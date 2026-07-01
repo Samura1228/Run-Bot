@@ -1,0 +1,1 @@
+"""Service layer: vision (Claude), sheets (gspread), scheduler, and leaderboard."""

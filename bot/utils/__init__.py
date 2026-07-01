@@ -1,0 +1,1 @@
+"""Utility helpers: date boundaries, image hashing, and points rules."""

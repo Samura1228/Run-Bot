@@ -1,0 +1,7 @@
+python-telegram-bot>=21,<22
+APScheduler>=3.10,<4
+gspread>=6,<7
+google-auth>=2,<3
+anthropic>=0.30
+pydantic>=2,<3
+tzdata>=2024.1
