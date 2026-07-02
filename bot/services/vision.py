@@ -12,15 +12,20 @@ import base64
 import json
 import logging
 import re
+from datetime import date
 from typing import Optional
 
 import anthropic
 
 from bot.models import VisionVerdict
+from bot.utils.dates import today_in
 
 logger = logging.getLogger(__name__)
 
-SYSTEM_PROMPT = """You are an image verification assistant for a running club.
+# The system prompt is built per-request so today's date (in the configured
+# timezone) can be injected, enabling correct year inference when a Garmin
+# screenshot omits the year.
+_SYSTEM_PROMPT_TEMPLATE = """You are an image verification assistant for a running club.
 You will be shown a single screenshot. Determine whether it is a Garmin Connect
 activity screenshot for a COMPLETED (not planned/scheduled) RUNNING activity,
 and extract structured details.
@@ -28,7 +33,7 @@ and extract structured details.
 Respond with a SINGLE valid JSON object and NOTHING else — no markdown, no code
 fences, no commentary. Use exactly this schema and these keys:
 
-{
+{{
   "is_garmin": boolean,        // true only if this is clearly a Garmin Connect screenshot
   "activity_type": string,     // one of: "running", "cycling", "walking", "swimming", "other", "unknown"
   "is_completed": boolean,     // true if the activity is completed with real recorded data (not a planned/scheduled workout)
@@ -36,14 +41,30 @@ fences, no commentary. Use exactly this schema and these keys:
   "distance": string|null,     // as shown, e.g. "5.02 km", else null
   "duration": string|null,     // as shown, e.g. "00:28:14", else null
   "confidence": number         // 0.0-1.0, your overall confidence in this verdict
-}
+}}
+
+Date context and year inference:
+- Today's date is {today} (timezone Europe/Nicosia).
+- The workout date on Garmin screenshots may omit the year (e.g. "1 июля" /
+  "July 1"). When the year is NOT shown, infer it as follows: choose the year
+  that makes the workout date the most recent date that is ON OR BEFORE today
+  (i.e. assume the current year; if that would make the date in the future
+  relative to today, use the previous year). NEVER return a year in the future.
+  NEVER default to an arbitrary past year like 2024.
+- Always return workout_date in strict ISO YYYY-MM-DD.
 
 Rules:
 - If it is not a Garmin screenshot, set is_garmin=false and confidence accordingly.
-- Never invent a date; if the date is not clearly visible, set workout_date=null.
+- Never invent a date; if no date is visible at all, set workout_date=null.
 - Do not add extra keys. Do not omit keys."""
 
 USER_TEXT = "Analyze the attached screenshot and return the JSON verdict per the schema."
+
+
+def _build_system_prompt(today: date) -> str:
+    """Build the system prompt with today's date injected for year inference."""
+
+    return _SYSTEM_PROMPT_TEMPLATE.format(today=today.isoformat())
 
 _JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
 
@@ -102,12 +123,16 @@ class ClaudeVisionService:
         api_key: str,
         model: str,
         *,
+        timezone: str = "Europe/Nicosia",
         max_tokens: int = 512,
         max_retries: int = 1,
         temperature: Optional[float] = None,
     ) -> None:
         self._client = anthropic.Anthropic(api_key=api_key)
         self._model = model
+        # The configured IANA timezone, used to compute "today" so the prompt
+        # can instruct Claude on correct year inference for no-year screenshots.
+        self._timezone = timezone
         self._max_tokens = max_tokens
         self._max_retries = max_retries
         # ``temperature`` is optional: when None it is OMITTED from the request
@@ -115,13 +140,15 @@ class ClaudeVisionService:
         # parameter. When set to a number it is included.
         self._temperature = temperature
 
-    def _call_api_sync(self, image_b64: str, media_type: str) -> str:
+    def _call_api_sync(
+        self, image_b64: str, media_type: str, system_prompt: str
+    ) -> str:
         """Blocking Anthropic API call. Returns the first text block's text."""
 
         create_kwargs: dict = {
             "model": self._model,
             "max_tokens": self._max_tokens,
-            "system": SYSTEM_PROMPT,
+            "system": system_prompt,
             "messages": [
                 {
                     "role": "user",
@@ -167,12 +194,17 @@ class ClaudeVisionService:
         if media_type not in _SUPPORTED_MEDIA_TYPES:
             media_type = "image/jpeg"
 
+        # Compute today's date in the configured timezone and bake it into the
+        # system prompt so Claude infers the correct year for no-year screenshots.
+        today = today_in(self._timezone)
+        system_prompt = _build_system_prompt(today)
+
         raw_text: Optional[str] = None
         attempts = self._max_retries + 1
         for attempt in range(1, attempts + 1):
             try:
                 raw_text = await asyncio.to_thread(
-                    self._call_api_sync, image_b64, media_type
+                    self._call_api_sync, image_b64, media_type, system_prompt
                 )
                 break
             except anthropic.APIError as exc:
