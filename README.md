@@ -98,9 +98,11 @@ You need the numeric chat ID (usually a large **negative** number like
 2. Add billing if required (vision calls consume credits).
 3. Open **API Keys** → **Create Key** → copy the key
    (starts with `sk-ant-...`). This is your `ANTHROPIC_API_KEY`.
-4. The default model is `claude-3-5-sonnet-latest` (a current vision-capable
-   Claude model). You can override it via `ANTHROPIC_MODEL` if you prefer a
-   newer model.
+4. The default model is `claude-3-5-sonnet-20241022` (a valid, widely-available
+   Claude 3.5 Sonnet vision model). You can override it via `ANTHROPIC_MODEL` if
+   you prefer a different model.
+   > If you get a 404 `not_found_error` for the model, set `ANTHROPIC_MODEL` to a
+   > model ID your Anthropic account has access to (see your Anthropic Console).
 
 ---
 
@@ -273,7 +275,7 @@ concise ✅/⚠️/❌ result is sent to chat.
 |----------|:--------:|---------|-------------|
 | `TELEGRAM_BOT_TOKEN` | ✅ | — | Bot token from @BotFather. |
 | `ANTHROPIC_API_KEY` | ✅ | — | Anthropic (Claude) API key. |
-| `ANTHROPIC_MODEL` | ❌ | `claude-3-5-sonnet-latest` | Claude vision model id. |
+| `ANTHROPIC_MODEL` | ❌ | `claude-3-5-sonnet-20241022` | Claude vision model id. |
 | `GOOGLE_SERVICE_ACCOUNT_JSON` | ✅ | — | Full service-account JSON (as a string). |
 | `GOOGLE_SHEET_ID` | ✅ | — | Target spreadsheet ID (from its URL). |
 | `TARGET_CHAT_ID` | ❌ | — | Group chat id for leaderboards (usually negative). Optional at first — discover it with the `/chatid` command; leaderboards are skipped until it's set. |
@@ -304,4 +306,28 @@ See [`.env.example`](.env.example) for a copy-paste template.
   redeploy.
 - **Valid run not awarded:** it must be dated **within the current Mon–Sun
   week** (Cyprus time) and pass the confidence threshold; older or low-confidence
+### Conflict / "terminated by other getUpdates request"
+
+If the logs show `telegram.error.Conflict: terminated by other getUpdates
+request`, it means **two instances are polling the same bot token at once**.
+Telegram only allows one long-poller per token. To resolve it:
+
+- **Don't run locally while Railway runs** the same token (or vice-versa). Stop
+  any local `python -m bot.main` session.
+- **In Railway, ensure only ONE deployment/replica is active.** Set replicas =
+  **1** and make sure old deployments are **fully stopped** — during a redeploy
+  the new deploy can briefly overlap the old one.
+- A brief overlap during a redeploy is **transient** and resolves automatically
+  once the old deployment stops; the bot logs a concise WARNING and keeps
+  running (it does not crash).
+
+The `/status` Anthropic check now uses the **configured** model, so a model
+`404 not_found_error` will surface there as `⚠️ model not found — set
+ANTHROPIC_MODEL to a valid model`, distinct from an `❌ invalid API key`.
+
+### Anthropic model 404 (`not_found_error`)
+
+If you see `not_found_error` for the model (e.g. an alias your account can't
+use), set `ANTHROPIC_MODEL` to a model ID your Anthropic account has access to
+(see your Anthropic Console). The default is `claude-3-5-sonnet-20241022`.
   runs are silently ignored by design.

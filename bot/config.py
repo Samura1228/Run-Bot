@@ -20,7 +20,7 @@ class Settings(BaseModel):
 
     telegram_bot_token: str = Field(..., min_length=1)
     anthropic_api_key: str = Field(..., min_length=1)
-    anthropic_model: str = Field(default="claude-3-5-sonnet-latest")
+    anthropic_model: str = Field(default="claude-3-5-sonnet-20241022")
     google_service_account_info: dict[str, Any]
     google_sheet_id: str = Field(..., min_length=1)
     target_chat_id: Optional[int] = None

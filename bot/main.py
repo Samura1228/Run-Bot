@@ -25,6 +25,7 @@ from bot.handlers.commands import (
     status_command,
     testsheet_command,
 )
+from bot.handlers.errors import error_handler
 from bot.handlers.photo import PhotoHandler
 from bot.services.leaderboard import LeaderboardService
 from bot.services.scheduler import build_scheduler
@@ -75,6 +76,10 @@ def build_application(settings: Settings) -> Application:
     application.add_handler(CommandHandler("chatid", chatid_command))
     application.add_handler(CommandHandler("testsheet", testsheet_command))
     application.add_handler(CommandHandler("status", status_command))
+
+    # Register a global error handler so exceptions in the update loop are
+    # logged cleanly (and Conflict is special-cased) instead of bubbling up.
+    application.add_error_handler(error_handler)
 
     # Stash references for the lifecycle hooks.
     application.bot_data["settings"] = settings

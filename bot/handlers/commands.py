@@ -114,7 +114,28 @@ async def _check_anthropic(settings: Settings) -> tuple[str, str]:
     except anthropic.AuthenticationError as exc:
         logger.error("Anthropic auth check failed (invalid key): %s", exc)
         return "❌", "invalid API key"
+    except anthropic.NotFoundError as exc:
+        # A 404 / not_found_error typically means the configured model id is not
+        # available to this account. Report it distinctly from an auth problem
+        # so the operator knows to fix ANTHROPIC_MODEL (never leak the key).
+        logger.error(
+            "Anthropic check failed (model not found: %s): %s",
+            settings.anthropic_model,
+            exc,
+        )
+        return "⚠️", "model not found — set ANTHROPIC_MODEL to a valid model"
     except anthropic.APIError as exc:
+        # Some SDK/transport paths surface a 404 as a generic APIError; detect a
+        # model not_found_error here too so it's still reported distinctly.
+        status_code = getattr(exc, "status_code", None)
+        message = str(exc).lower()
+        if status_code == 404 or "not_found_error" in message:
+            logger.error(
+                "Anthropic check failed (model not found: %s): %s",
+                settings.anthropic_model,
+                exc,
+            )
+            return "⚠️", "model not found — set ANTHROPIC_MODEL to a valid model"
         logger.error("Anthropic auth check failed (API error): %s", exc)
         return "⚠️", "API error — see logs"
     except Exception as exc:  # pragma: no cover - defensive
