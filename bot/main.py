@@ -20,7 +20,11 @@ from telegram.ext import (
 )
 
 from bot.config import ConfigError, Settings, get_settings
-from bot.handlers.commands import chatid_command
+from bot.handlers.commands import (
+    chatid_command,
+    status_command,
+    testsheet_command,
+)
 from bot.handlers.photo import PhotoHandler
 from bot.services.leaderboard import LeaderboardService
 from bot.services.scheduler import build_scheduler
@@ -67,8 +71,10 @@ def build_application(settings: Settings) -> Application:
     )
     application.add_handler(MessageHandler(filters.PHOTO, photo_handler))
 
-    # Register the /chatid utility command (works in any chat type).
+    # Register utility & diagnostic commands (work in any chat type).
     application.add_handler(CommandHandler("chatid", chatid_command))
+    application.add_handler(CommandHandler("testsheet", testsheet_command))
+    application.add_handler(CommandHandler("status", status_command))
 
     # Stash references for the lifecycle hooks.
     application.bot_data["settings"] = settings

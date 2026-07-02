@@ -239,6 +239,32 @@ if Claude confirms it's a **Garmin**, **running**, **completed** activity with a
 **valid date** in the **current week** and confidence ≥ `MIN_CONFIDENCE`
 (default **0.6**). Everything else is silently ignored.
 
+## Diagnostics
+
+Three slash commands help verify the bot's integrations at runtime. They work in
+any chat (DM the bot or run them in the group) and never leak secrets — only a
+concise ✅/⚠️/❌ result is sent to chat.
+
+- **`/status`** — a consolidated health report across all integrations:
+  - **Telegram** — ✅ with the bot's `@username` (via `get_me()`).
+  - **Anthropic** — ✅ if `ANTHROPIC_API_KEY` is present and a minimal, cheap
+    `messages.create` (`max_tokens=1`) with the configured model succeeds; ❌ on
+    an invalid key; ⚠️ on other API errors.
+  - **Google Sheets** — same check as `/testsheet` (see below).
+  - **Target chat** — shows `TARGET_CHAT_ID` if set, or a ⚠️ note that
+    leaderboards are disabled.
+  - **Timezone** — the configured `TIMEZONE`.
+- **`/testsheet`** — verifies Google Sheets connectivity and **Editor** access:
+  authorizes with the service account, opens the spreadsheet by `GOOGLE_SHEET_ID`,
+  ensures the `Log` worksheet (auto-creating it — which itself requires Editor
+  access — if missing, without appending junk to real data), and reads the
+  header row to confirm read access. On failure it returns a short hint
+  (permission denied → share the sheet with the service-account email; bad JSON
+  → check `GOOGLE_SERVICE_ACCOUNT_JSON`; missing/incorrect `GOOGLE_SHEET_ID`).
+- **`/chatid`** — replies with the current chat's ID, type, and title so you can
+  discover the value for `TARGET_CHAT_ID`.
+
+---
 ---
 
 ## Environment variables reference
