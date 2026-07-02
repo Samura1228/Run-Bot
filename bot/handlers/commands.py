@@ -103,11 +103,16 @@ async def _check_anthropic(settings: Settings) -> tuple[str, str]:
 
     def _ping() -> None:
         client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
-        client.messages.create(
-            model=settings.anthropic_model,
-            max_tokens=1,
-            messages=[{"role": "user", "content": "Hi"}],
-        )
+        create_kwargs: dict = {
+            "model": settings.anthropic_model,
+            "max_tokens": 1,
+            "messages": [{"role": "user", "content": "Hi"}],
+        }
+        # Only include temperature when explicitly configured; omit otherwise so
+        # models (e.g. claude-sonnet-5) that reject the parameter still pass.
+        if settings.anthropic_temperature is not None:
+            create_kwargs["temperature"] = settings.anthropic_temperature
+        client.messages.create(**create_kwargs)
 
     try:
         await asyncio.to_thread(_ping)
@@ -136,6 +141,12 @@ async def _check_anthropic(settings: Settings) -> tuple[str, str]:
                 exc,
             )
             return "⚠️", "model not found — set ANTHROPIC_MODEL to a valid model"
+        # A 400 invalid_request_error (e.g. an unsupported parameter) should no
+        # longer occur for temperature, but report any other 400 distinctly with
+        # a short, secret-free reason so the operator has a hint.
+        if status_code == 400 or "invalid_request_error" in message:
+            logger.error("Anthropic check failed (bad request): %s", exc)
+            return "⚠️", "bad request — see logs"
         logger.error("Anthropic auth check failed (API error): %s", exc)
         return "⚠️", "API error — see logs"
     except Exception as exc:  # pragma: no cover - defensive

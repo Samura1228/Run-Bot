@@ -21,6 +21,11 @@ class Settings(BaseModel):
     telegram_bot_token: str = Field(..., min_length=1)
     anthropic_api_key: str = Field(..., min_length=1)
     anthropic_model: str = Field(default="claude-3-5-sonnet-20241022")
+    # Optional sampling temperature for Anthropic calls. Leave unset (None) for
+    # newer models (e.g. claude-sonnet-5) that REJECT the ``temperature``
+    # parameter — when None, ``temperature`` is omitted entirely from requests.
+    # Set to a number (e.g. 0) only for older models that support/require it.
+    anthropic_temperature: Optional[float] = None
     google_service_account_info: dict[str, Any]
     google_sheet_id: str = Field(..., min_length=1)
     target_chat_id: Optional[int] = None
@@ -105,6 +110,15 @@ def load_settings() -> Settings:
     # Optional overrides.
     if os.environ.get("ANTHROPIC_MODEL"):
         kwargs["anthropic_model"] = os.environ["ANTHROPIC_MODEL"]
+    # ANTHROPIC_TEMPERATURE is optional. Blank/unset → None → temperature is
+    # omitted from requests (required for models like claude-sonnet-5 that
+    # reject it). When set to a number, it is included in the API call.
+    anthropic_temperature_raw = os.environ.get("ANTHROPIC_TEMPERATURE")
+    if anthropic_temperature_raw is not None and anthropic_temperature_raw.strip() != "":
+        try:
+            kwargs["anthropic_temperature"] = float(anthropic_temperature_raw)
+        except ValueError as exc:
+            raise ConfigError("ANTHROPIC_TEMPERATURE must be a float") from exc
     if os.environ.get("TIMEZONE"):
         kwargs["timezone"] = os.environ["TIMEZONE"]
     if os.environ.get("MIN_CONFIDENCE"):

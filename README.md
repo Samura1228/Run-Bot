@@ -276,6 +276,7 @@ concise ✅/⚠️/❌ result is sent to chat.
 | `TELEGRAM_BOT_TOKEN` | ✅ | — | Bot token from @BotFather. |
 | `ANTHROPIC_API_KEY` | ✅ | — | Anthropic (Claude) API key. |
 | `ANTHROPIC_MODEL` | ❌ | `claude-3-5-sonnet-20241022` | Claude vision model id. |
+| `ANTHROPIC_TEMPERATURE` | ❌ | *(omitted)* | Sampling temperature. Leave unset for newer models like `claude-sonnet-5` that reject `temperature`; set e.g. `0` only for older models that support it. |
 | `GOOGLE_SERVICE_ACCOUNT_JSON` | ✅ | — | Full service-account JSON (as a string). |
 | `GOOGLE_SHEET_ID` | ✅ | — | Target spreadsheet ID (from its URL). |
 | `TARGET_CHAT_ID` | ❌ | — | Group chat id for leaderboards (usually negative). Optional at first — discover it with the `/chatid` command; leaderboards are skipped until it's set. |

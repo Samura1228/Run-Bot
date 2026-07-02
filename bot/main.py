@@ -57,6 +57,7 @@ def build_application(settings: Settings) -> Application:
     vision = ClaudeVisionService(
         api_key=settings.anthropic_api_key,
         model=settings.anthropic_model,
+        temperature=settings.anthropic_temperature,
     )
     leaderboard = LeaderboardService(sheets)
     activity_points = build_activity_points(settings.points_per_run)

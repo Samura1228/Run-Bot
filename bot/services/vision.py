@@ -104,21 +104,25 @@ class ClaudeVisionService:
         *,
         max_tokens: int = 512,
         max_retries: int = 1,
+        temperature: Optional[float] = None,
     ) -> None:
         self._client = anthropic.Anthropic(api_key=api_key)
         self._model = model
         self._max_tokens = max_tokens
         self._max_retries = max_retries
+        # ``temperature`` is optional: when None it is OMITTED from the request
+        # so the call works with models (e.g. claude-sonnet-5) that reject the
+        # parameter. When set to a number it is included.
+        self._temperature = temperature
 
     def _call_api_sync(self, image_b64: str, media_type: str) -> str:
         """Blocking Anthropic API call. Returns the first text block's text."""
 
-        response = self._client.messages.create(
-            model=self._model,
-            max_tokens=self._max_tokens,
-            temperature=0,
-            system=SYSTEM_PROMPT,
-            messages=[
+        create_kwargs: dict = {
+            "model": self._model,
+            "max_tokens": self._max_tokens,
+            "system": SYSTEM_PROMPT,
+            "messages": [
                 {
                     "role": "user",
                     "content": [
@@ -134,7 +138,13 @@ class ClaudeVisionService:
                     ],
                 }
             ],
-        )
+        }
+        # Only include temperature when explicitly configured; omit otherwise so
+        # models that reject the parameter still work out-of-the-box.
+        if self._temperature is not None:
+            create_kwargs["temperature"] = self._temperature
+
+        response = self._client.messages.create(**create_kwargs)
         for block in response.content:
             if getattr(block, "type", None) == "text":
                 return block.text
