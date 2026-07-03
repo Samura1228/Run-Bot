@@ -34,7 +34,7 @@ Respond with a SINGLE valid JSON object and NOTHING else — no markdown, no cod
 fences, no commentary. Use exactly this schema and these keys:
 
 {{
-  "is_garmin": boolean,        // true only if this is clearly a Garmin Connect screenshot
+  "is_garmin": boolean,        // true if this is a Garmin Connect activity screenshot (recognized by its layout — see below)
   "activity_type": string,     // one of: "running", "cycling", "walking", "swimming", "other", "unknown"
   "is_completed": boolean,     // true if the activity is completed with real recorded data (not a planned/scheduled workout)
   "workout_date": string|null, // the activity date in ISO "YYYY-MM-DD" if visible, else null
@@ -42,6 +42,31 @@ fences, no commentary. Use exactly this schema and these keys:
   "duration": string|null,     // as shown, e.g. "00:28:14", else null
   "confidence": number         // 0.0-1.0, your overall confidence in this verdict
 }}
+
+Recognizing Garmin Connect (how to judge is_garmin):
+- You are identifying screenshots from the Garmin Connect mobile app's activity
+  detail screen. The word "Garmin" is frequently NOT visible on these
+  screenshots — do NOT require it. Instead, recognize Garmin Connect by its
+  characteristic activity-detail layout and styling.
+- Garmin Connect visual signatures (ANY strong combination indicates Garmin):
+  - A top tab bar with sections like "Обзор, Статистика, Интервалы/Круги,
+    Графики, Инвентарь" (Overview, Stats, Intervals/Laps, Graphs, Gear) — these
+    localized tab names are a strong Garmin Connect signal.
+  - A route map with a pace/intensity heat-map gradient legend labelled low→high
+    ("Низкая ▸ Высокая" or "Low ▸ High"), often on a Google-attributed map, with
+    green (start) and red (stop) markers.
+  - An activity title line with an activity-type icon and a date/time
+    (e.g. "3 июля @ 08:00").
+  - A stat grid with metrics such as Distance (Расстояние, in км), Avg Heart
+    Rate (Средняя частота пульса, уд/м), Avg Pace (Средний темп, /км), Total
+    Time (Общее время), Calories (Всего калорий).
+  - Garmin's dark-theme styling with blue accent icons next to HR/pace metrics.
+- If the screenshot clearly shows this Garmin Connect activity-detail layout
+  (even without the word "Garmin"), set is_garmin=true. Only set is_garmin=false
+  when the screenshot is clearly from a DIFFERENT app (e.g. Strava's orange
+  branding, Nike Run Club, Apple Fitness/Activity rings, adidas
+  Running/Runtastic, Polar, Coros, Suunto, MapMyRun) or is not a workout
+  screenshot at all.
 
 Date context and year inference:
 - Today's date is {today} (timezone Europe/Nicosia).
@@ -54,7 +79,12 @@ Date context and year inference:
 - Always return workout_date in strict ISO YYYY-MM-DD.
 
 Rules:
-- If it is not a Garmin screenshot, set is_garmin=false and confidence accordingly.
+- Judge is_garmin by the Garmin Connect layout described above, NOT by whether
+  the literal word "Garmin" appears on screen.
+- activity_type: set "running" for a run; otherwise the matching type
+  (cycling/walking/swimming/other) or "unknown".
+- is_completed: true only when the activity shows real recorded data (not a
+  planned/scheduled workout).
 - Never invent a date; if no date is visible at all, set workout_date=null.
 - Do not add extra keys. Do not omit keys."""
 
