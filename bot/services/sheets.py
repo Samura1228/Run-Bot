@@ -28,6 +28,35 @@ _SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 WORKSHEET_NAME = "Log"
 
+# Append retry policy: up to 3 attempts with exponential backoff (1s, 2s, 4s).
+_APPEND_MAX_ATTEMPTS = 3
+_APPEND_BACKOFF_BASE_SECONDS = 1.0
+
+# HTTP statuses considered transient (worth retrying).
+_TRANSIENT_STATUSES = frozenset({429, 500, 502, 503, 504})
+
+
+def _api_error_status(exc: gspread.exceptions.APIError) -> Optional[int]:
+    """Best-effort extraction of the HTTP status code from a gspread APIError."""
+
+    return getattr(getattr(exc, "response", None), "status_code", None)
+
+
+def _is_transient_error(exc: BaseException) -> bool:
+    """Classify an exception as a transient (retryable) failure.
+
+    Transient: network hiccups, timeouts, and 5xx / 429 API errors (e.g. the
+    ``502 Bad Gateway`` seen in production). Permanent client errors such as
+    401/403 (permission) are NOT transient and must not be retried.
+    """
+
+    if isinstance(exc, (ConnectionError, TimeoutError, OSError)):
+        return True
+    if isinstance(exc, gspread.exceptions.APIError):
+        status = _api_error_status(exc)
+        return status in _TRANSIENT_STATUSES
+    return False
+
 HEADER_ROW = [
     "timestamp",
     "telegram_user_id",
@@ -178,21 +207,75 @@ class SheetsService:
         # IDs and hashes as plain text.
         worksheet.append_row(values, value_input_option="RAW")
 
-    async def append_workout(self, row: WorkoutLogRow) -> None:
+    async def append_workout(self, row: WorkoutLogRow) -> bool:
         """Append a confirmed workout row to the ``Log`` worksheet.
 
-        Raises the underlying exception on failure so the caller can avoid
-        sending a success reply for an unrecorded point.
+        Retries the blocking ``append_row`` up to :data:`_APPEND_MAX_ATTEMPTS`
+        times on transient failures (network errors, timeouts, 5xx/429 API
+        errors) with exponential backoff (1s, 2s, 4s). Permanent client errors
+        (e.g. 401/403 permission) are NOT retried and propagate immediately.
+
+        Returns ``True`` once the row is confirmed written. Raises the
+        underlying exception on final failure so the caller can avoid sending a
+        success reply for an unrecorded point.
         """
 
-        await asyncio.to_thread(self._append_row_sync, row.to_sheet_row())
-        logger.info(
-            "Appended workout for user %s (%s), %s pts on %s.",
-            row.telegram_user_id,
-            row.display_name,
-            row.points,
-            row.workout_date,
-        )
+        values = row.to_sheet_row()
+        last_exc: Optional[BaseException] = None
+
+        for attempt in range(1, _APPEND_MAX_ATTEMPTS + 1):
+            try:
+                # Blocking gspread write stays off the event loop.
+                await asyncio.to_thread(self._append_row_sync, values)
+            except Exception as exc:
+                if not _is_transient_error(exc):
+                    # Permanent failure (e.g. 401/403 permission) — do not retry.
+                    logger.error(
+                        "Append failed with a permanent error for user %s: %s",
+                        row.telegram_user_id,
+                        exc,
+                    )
+                    raise
+                last_exc = exc
+                if attempt < _APPEND_MAX_ATTEMPTS:
+                    backoff = _APPEND_BACKOFF_BASE_SECONDS * (2 ** (attempt - 1))
+                    logger.warning(
+                        "Transient append failure for user %s (attempt %d/%d): "
+                        "%s; retrying in %.1fs.",
+                        row.telegram_user_id,
+                        attempt,
+                        _APPEND_MAX_ATTEMPTS,
+                        exc,
+                        backoff,
+                    )
+                    await asyncio.sleep(backoff)
+                    continue
+                # Exhausted retries on a transient error.
+                logger.error(
+                    "Append failed after %d attempts for user %s: %s",
+                    _APPEND_MAX_ATTEMPTS,
+                    row.telegram_user_id,
+                    exc,
+                )
+                raise
+            else:
+                username_label = (
+                    f"@{row.telegram_username}" if row.telegram_username else "-"
+                )
+                logger.info(
+                    "Logged workout: user=%s username=%s date=%s points=%s",
+                    row.telegram_user_id,
+                    username_label,
+                    row.workout_date,
+                    row.points,
+                )
+                return True
+
+        # Unreachable in practice (loop either returns True or raises), but keep
+        # a defensive failure signal for the caller.
+        if last_exc is not None:  # pragma: no cover - defensive
+            raise last_exc
+        return False  # pragma: no cover - defensive
 
 
 def _check_sheets_sync(service_account_info: dict[str, Any], sheet_id: str) -> str:

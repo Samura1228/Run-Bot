@@ -163,14 +163,28 @@ class PhotoHandler:
             message_id=message.message_id,
         )
 
+        # Write to the Sheet FIRST and confirm success before any ✅ reply.
+        # append_workout retries transient failures and returns True only once
+        # the row is confirmed written; it raises on final failure.
         try:
-            await self._sheets.append_workout(row)
+            appended = await self._sheets.append_workout(row)
         except Exception as exc:
-            # Do NOT reply if the write failed — avoid claiming an unrecorded point.
+            # The write ultimately failed (after retries) — do NOT claim an
+            # unrecorded point. Send a short, honest failure reply instead.
             logger.error("Failed to append workout to Sheet: %s", exc)
+            appended = False
+
+        if not appended:
+            try:
+                await message.reply_text(
+                    "⚠️ Couldn't save your run to the log — "
+                    "please re-post in a moment."
+                )
+            except TelegramError as exc:
+                logger.error("Failed to send failure reply: %s", exc)
             return
 
-        # 9) Confirmation reply.
+        # 9) Confirmation reply — only after a confirmed Sheet write.
         who = display_name or (f"@{username}" if username else "runner")
         reply_text = (
             f"✅ Nice run, {who}! +{points} points logged for {verdict.workout_date}."
