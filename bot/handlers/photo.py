@@ -1,10 +1,12 @@
 """Photo handler.
 
 Orchestrates the full pipeline for photo messages:
-download → hash → dedup → vision → decision → log/reply.
+download → hash → dedup → vision → decision → silent log.
 
-All non-eligible / failure paths are handled silently (no reply, no log) to
-avoid spamming the group, per the blueprint.
+Logging is SILENT: on a successful, eligible current-week run the row is
+written to the Google Sheet and an INFO log is emitted — no chat reply is
+sent. All non-eligible / failure paths are likewise handled silently (no
+chat reply), remaining observable only via logs, per the blueprint.
 """
 
 from __future__ import annotations
@@ -163,33 +165,25 @@ class PhotoHandler:
             message_id=message.message_id,
         )
 
-        # Write to the Sheet FIRST and confirm success before any ✅ reply.
+        # Write to the Sheet FIRST and confirm success before logging.
         # append_workout retries transient failures and returns True only once
         # the row is confirmed written; it raises on final failure.
         try:
             appended = await self._sheets.append_workout(row)
         except Exception as exc:
-            # The write ultimately failed (after retries) — do NOT claim an
-            # unrecorded point. Send a short, honest failure reply instead.
+            # The write ultimately failed (after retries). Logging is silent:
+            # log an ERROR (visible in Railway logs) but send NO chat message.
             logger.error("Failed to append workout to Sheet: %s", exc)
             appended = False
 
         if not appended:
-            try:
-                await message.reply_text(
-                    "⚠️ Couldn't save your run to the log — "
-                    "please re-post in a moment."
-                )
-            except TelegramError as exc:
-                logger.error("Failed to send failure reply: %s", exc)
+            # Silent failure — observable via the ERROR log above only.
             return
 
-        # 9) Confirmation reply — only after a confirmed Sheet write.
-        who = display_name or (f"@{username}" if username else "runner")
-        reply_text = (
-            f"✅ Nice run, {who}! +{points} points logged for {verdict.workout_date}."
+        # 9) Success is fully silent: no chat reply, just the INFO log.
+        logger.info(
+            "Logged workout: user=%s date=%s points=%s",
+            user.id,
+            verdict.workout_date,
+            points,
         )
-        try:
-            await message.reply_text(reply_text)
-        except TelegramError as exc:
-            logger.error("Failed to send confirmation reply: %s", exc)
