@@ -65,10 +65,21 @@ class LeaderboardService:
 
     @staticmethod
     def _format_ranking(entries: list[LeaderboardEntry]) -> str:
+        """Render one line per entry.
+
+        Each line is ``{name}  - {points} points`` (note the two spaces
+        before the hyphen, per the requested layout) with a trailing medal
+        for ranks 1–3 and no trailing emoji for ranks 4+.
+        """
+
         lines: list[str] = []
         for rank, entry in enumerate(entries, start=1):
-            prefix = _MEDALS.get(rank, f"{rank}.")
-            lines.append(f"{prefix} {entry.label()} — {entry.points} pts")
+            name = entry.label()
+            line = f"{name}  - {entry.points} points"
+            medal = _MEDALS.get(rank)
+            if medal:
+                line = f"{line} {medal}"
+            lines.append(line)
         return "\n".join(lines)
 
     def format_weekly(
@@ -79,13 +90,10 @@ class LeaderboardService:
     ) -> str:
         """Format a weekly leaderboard message for a Mon–Sun range."""
 
-        header = (
-            f"🏃 Weekly Leaderboard (Mon {start_date.isoformat()} – "
-            f"Sun {end_date.isoformat()})"
-        )
+        header = "Weekly leaders board 🏆"
         if not entries:
-            return f"{header}\n\nNo runs logged this week. Let's change that! 💪"
-        return f"{header}\n\n{self._format_ranking(entries)}\n\nGreat work this week! 💪"
+            return f"{header}\n\nNo runs logged this week yet."
+        return f"{header}\n\n{self._format_ranking(entries)}"
 
     def format_monthly(
         self,
@@ -95,14 +103,7 @@ class LeaderboardService:
     ) -> str:
         """Format a monthly leaderboard message for a full calendar month."""
 
-        month_label = start_date.strftime("%B %Y")
-        header = f"📅 Monthly Leaderboard — {month_label}"
+        header = "Monthly leaders board 🏆"
         if not entries:
-            return (
-                f"{header}\n\nNo runs logged this month. "
-                "New month, fresh start! 🥇"
-            )
-        return (
-            f"{header}\n\n{self._format_ranking(entries)}\n\n"
-            "See you on the roads next month! 🥇"
-        )
+            return f"{header}\n\nNo runs logged this month yet."
+        return f"{header}\n\n{self._format_ranking(entries)}"

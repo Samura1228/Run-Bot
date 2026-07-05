@@ -235,10 +235,31 @@ Run Bot uses **long-polling**, so it runs as a **worker** (no HTTP port).
 - **Weekly (Mon 09:00):** posts totals for the **previous** Monday–Sunday week.
 - **Monthly (1st 09:00):** posts totals for the **previous** full calendar month.
 - Rankings sum each user's points over the range, sorted high→low, with 🥇🥈🥉
-  medals for the top three. Users are labelled by full name, else `@username`,
-  else `user <id>`.
+  medals for the top three (ranks 4+ have no medal). Users are labelled by full
+  name, else `@username`, else `user <id>`. All participants with points are
+  listed.
 - If nobody logged a run in the period, the bot still posts a friendly "no runs
   logged" message so the group knows it's alive.
+
+Example output:
+
+```
+Weekly leaders board 🏆
+
+Jane Runner  - 30 points 🥇
+@speedy  - 20 points 🥈
+Alex  - 10 points 🥉
+Sam  - 10 points
+```
+
+```
+Monthly leaders board 🏆
+
+Jane Runner  - 120 points 🥇
+@speedy  - 90 points 🥈
+Alex  - 40 points 🥉
+Sam  - 20 points
+```
 
 **Points & eligibility:** a photo earns `POINTS_PER_RUN` (default **10**) only
 if Claude confirms it's a **Garmin**, **running**, **completed** activity with a

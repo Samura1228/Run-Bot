@@ -365,28 +365,28 @@ function aggregate(rows, range_start, range_end):
 
 **Weekly:**
 ```
-🏃 Weekly Leaderboard (Mon {prev_week_start} – Sun {prev_week_end})
+Weekly leaders board 🏆
 
-1. Jane Runner — 30 pts
-2. @speedy — 20 pts
-3. Alex — 10 pts
-
-Great work this week! 💪
+Jane Runner  - 30 points 🥇
+@speedy  - 20 points 🥈
+Alex  - 10 points 🥉
+Sam  - 10 points
 ```
 
 **Monthly:**
 ```
-📅 Monthly Leaderboard — {Month YYYY}
+Monthly leaders board 🏆
 
-1. Jane Runner — 120 pts
-2. @speedy — 90 pts
-3. Alex — 40 pts
-
-See you on the roads next month! 🥇
+Jane Runner  - 120 points 🥇
+@speedy  - 90 points 🥈
+Alex  - 40 points 🥉
+Sam  - 20 points
 ```
 
+- Each line is `{name}  - {points} points {medal}` (two spaces before the hyphen). Medals 🥇🥈🥉 are shown for ranks 1–3 only; ranks 4+ have no trailing emoji.
+- All participants with points in the period are listed (not truncated), ranked high→low.
 - Display name preference: `display_name` if present, else `@username`, else `user {id}`.
-- If there are **no entries** in the range, post a friendly "no runs logged this period" message (configurable; still posts so the group knows the bot is alive).
+- If there are **no entries** in the range, post a friendly empty-state message under the same header (`Weekly leaders board 🏆\n\nNo runs logged this week yet.` / `Monthly leaders board 🏆\n\nNo runs logged this month yet.`); it still posts so the group knows the bot is alive.
 
 ---
 
