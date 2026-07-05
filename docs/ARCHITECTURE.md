@@ -12,7 +12,7 @@
 1. Joins a Telegram group and passively listens to all messages.
 2. On any **photo** message, downloads the image, hashes the raw bytes (dedup), and sends it to **Claude vision**.
 3. Claude returns a **strict JSON verdict** (is it a Garmin running screenshot, completed, with a workout date, etc.).
-4. The bot applies **points/date-window logic**: if the workout date falls in the **current Mon–Sun week** (Europe/Nicosia) → award **10 points** and **silently** log to Google Sheets (no chat reply; only an INFO log line). Otherwise → silently ignore.
+4. The bot applies **points/date-window logic**: if the workout date falls in the **current Mon–Sun week** (Europe/Nicosia) → award **10 points**, log the run to Google Sheets (row written first, then an INFO log line), and reply in chat with `✅ Nice run, {name}! +{points} points.`. Otherwise → silently ignore.
 5. An **APScheduler** (AsyncIOScheduler, timezone `Europe/Nicosia`) runs on the same event loop and posts a **weekly leaderboard** (Monday 09:00) and a **monthly leaderboard** (1st of month 09:00).
 6. **Google Sheets is the single source of truth.** Leaderboards are computed by reading and aggregating the sheet, so restarts lose no data.
 
@@ -32,7 +32,7 @@ flowchart TD
     DEC -->|no / low confidence / parse fail| IGN2[Silently ignore]
     DEC -->|yes| AWARD[Award 10 points]
     AWARD --> SHEET[(Google Sheet<br/>source of truth)]
-    AWARD --> LOG[INFO log only<br/>no chat reply]
+    AWARD --> LOG[INFO log + chat reply<br/>after Sheet write]
 
     SCHED[APScheduler<br/>AsyncIOScheduler<br/>Europe/Nicosia] -->|mon 09:00| WEEK[Weekly leaderboard job]
     SCHED -->|day=1 09:00| MONTH[Monthly leaderboard job]
@@ -99,7 +99,7 @@ run-bot/
 | [`bot/main.py`](bot/main.py) | Application entry point; wires config, services, handlers, scheduler; starts long-polling. |
 | [`bot/config.py`](bot/config.py) | Read & validate all environment variables; expose a typed `Settings` singleton. |
 | [`bot/models.py`](bot/models.py) | Typed data models: `VisionVerdict`, `WorkoutLogRow`, `LeaderboardEntry`. |
-| [`bot/handlers/photo.py`](bot/handlers/photo.py) | End-to-end photo pipeline orchestration; logs silently to the Sheet (no chat reply). |
+| [`bot/handlers/photo.py`](bot/handlers/photo.py) | End-to-end photo pipeline orchestration; writes to the Sheet first, then replies `✅ Nice run, {name}! +{points} points.`. |
 | [`bot/services/vision.py`](bot/services/vision.py) | Call Claude vision; enforce strict JSON schema; return validated `VisionVerdict`. |
 | [`bot/services/sheets.py`](bot/services/sheets.py) | All Google Sheets I/O: dedup lookup, append row, read range for aggregation. |
 | [`bot/services/scheduler.py`](bot/services/scheduler.py) | Configure & start `AsyncIOScheduler` cron triggers on the PTB loop. |
@@ -273,13 +273,14 @@ function decide_and_process(message, verdict, image_hash):
         return IGNORE   # silent
 
     row = build_log_row(message, verdict, points, image_hash)
-    sheets.append_row(row)                     # real-time log (silent)
-    logger.info("Logged workout: user=%s date=%s points=%s", ...)  # no chat reply
+    sheets.append_row(row)                     # real-time log (write-first)
+    logger.info("Logged workout: user=%s date=%s points=%s", ...)
+    message.reply_text(f"✅ Nice run, {name}! +{points} points.")  # after write
     return AWARDED
 ```
 
 
-**Logging is silent:** on success the row is written to the Sheet and an INFO log line `Logged workout: user=... date=... points=10` is emitted — **no chat message** is sent. (Weekly/monthly leaderboards are still posted to the group.)
+**Write-first, then reply:** on success the row is written to the Sheet and an INFO log line `Logged workout: user=... date=... points=10` is emitted; **only after** the confirmed write does the bot reply in chat with `✅ Nice run, {name}! +{points} points.`. A failed reply is logged but never undoes the saved row. Failures/ignored images remain silent. (Weekly/monthly leaderboards are still posted to the group.)
 ---
 
 ## 6. Scheduling Design
@@ -506,7 +507,8 @@ sequenceDiagram
             B-->>U: (silent, no reply)
         else eligible + workout_date in current Mon–Sun week
             B->>S: append_row (10 pts, running, ...)
-            B->>B: INFO log (silent, no chat reply)
+            B->>B: INFO log (after confirmed write)
+            B-->>U: ✅ Nice run, {name}! +{points} points.
         else eligible but older than current week
             B-->>U: (silent, no reply)
         end

@@ -3,10 +3,11 @@
 Orchestrates the full pipeline for photo messages:
 download → hash → dedup → vision → decision → silent log.
 
-Logging is SILENT: on a successful, eligible current-week run the row is
-written to the Google Sheet and an INFO log is emitted — no chat reply is
-sent. All non-eligible / failure paths are likewise handled silently (no
-chat reply), remaining observable only via logs, per the blueprint.
+On a successful, eligible current-week run the row is written to the Google
+Sheet FIRST; once the write is confirmed and the INFO log is emitted, the bot
+replies to the chat with "✅ Nice run, {name}! +{points} points.". All
+non-eligible / failure paths are handled silently (no chat reply), remaining
+observable only via logs, per the blueprint.
 """
 
 from __future__ import annotations
@@ -180,10 +181,23 @@ class PhotoHandler:
             # Silent failure — observable via the ERROR log above only.
             return
 
-        # 9) Success is fully silent: no chat reply, just the INFO log.
+        # 9) Success: INFO log first, then a chat reply confirming the run.
         logger.info(
             "Logged workout: user=%s date=%s points=%s",
             user.id,
             verdict.workout_date,
             points,
         )
+
+        # The row is already safely written. Send a plain-text confirmation
+        # (no parse_mode to avoid Markdown/HTML injection via the name). Prefer
+        # the poster's @username, else their display name / first name.
+        who = f"@{username}" if username else (display_name or user.first_name or "runner")
+        try:
+            await message.reply_text(f"✅ Nice run, {who}! +{points} points.")
+        except TelegramError as exc:
+            # The log is already saved; a failed reply must not crash the
+            # handler or undo the write. Log and move on.
+            logger.error("Failed to send success reply: %s", exc)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.error("Unexpected error sending success reply: %s", exc)

@@ -7,8 +7,10 @@ whenever someone posts a **photo**, it:
 2. Sends it to **Claude vision** to check whether it's a **completed Garmin
    Connect running screenshot** and extract the workout date.
 3. If it's a valid run **dated within the current Mon–Sun week** (Cyprus time),
-   it awards **points** and **silently** logs the run to a **Google Sheet** —
-   no chat reply is sent. Otherwise it silently ignores the photo.
+   it awards **points** and logs the run to a **Google Sheet** (the row is
+   written first), then replies in chat with
+   `✅ Nice run, {name}! +{points} points.`. Otherwise it silently ignores the
+   photo.
 4. Automatically posts a **weekly leaderboard** every Monday at 09:00 and a
    **monthly leaderboard** on the 1st of each month at 09:00 (Europe/Nicosia).
 
@@ -186,9 +188,10 @@ python -m bot.main
 
 You should see log lines like `Starting Run Bot ...`, `SheetsService
 initialized ...`, and `Bot started; scheduler running.` Post a Garmin running
-screenshot in the group to test — a valid, current-week run is logged silently
-(no chat reply): a new row is written to the sheet and an INFO log line
-`Logged workout: ...` appears in the Railway logs.
+screenshot in the group to test — for a valid, current-week run a new row is
+written to the sheet first, an INFO log line `Logged workout: ...` appears in
+the Railway logs, and the bot then replies in chat with
+`✅ Nice run, {name}! +{points} points.`.
 
 > The `.env` file is git-ignored. Never commit real credentials.
 
