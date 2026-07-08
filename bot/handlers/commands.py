@@ -33,6 +33,7 @@ from bot.utils.points import (
     MIN_PLAN,
     STANDARD_POINTS_PER_WEEK,
     clamp_plan,
+    format_points,
 )
 
 logger = logging.getLogger(__name__)
@@ -112,7 +113,7 @@ async def setplan_command(
 
     Registered with ``CommandHandler("setplan", setplan_command)``; PTB also
     matches the ``/setplan@BotUsername N`` form. The integer argument must be
-    within ``[MIN_PLAN, MAX_PLAN]`` (2–7); otherwise a short usage/error message
+    within ``[MIN_PLAN, MAX_PLAN]`` (2–6); otherwise a short usage/error message
     is sent. On success the user's Plans row is upserted (preserving streak) and
     a confirmation with the per-workout point value is returned. Attributed to
     ``message.from_user`` so it works in group chats.
@@ -153,7 +154,7 @@ async def setplan_command(
         await _safe_reply(message, "❌ Could not set plan — please try again later.")
         return
 
-    per_workout = round(STANDARD_POINTS_PER_WEEK / plan)
+    per_workout = format_points(STANDARD_POINTS_PER_WEEK / plan)
     await _safe_reply(
         message,
         f"✅ Plan set: {plan} workouts/week. Points per workout: "

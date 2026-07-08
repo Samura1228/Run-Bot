@@ -214,7 +214,8 @@ class SheetsService:
 
         Each returned dict has: ``telegram_user_id`` (int), ``telegram_username``
         (str), ``display_name`` (str), ``workout_date`` (date), and ``points``
-        (int). Rows that fail parsing are skipped.
+        (float). Points are parsed as floats so fractional per-workout values
+        (e.g. ``7.5``) aggregate correctly. Rows that fail parsing are skipped.
         """
 
         rows = await asyncio.to_thread(self._read_all_records_sync)
@@ -231,7 +232,7 @@ class SheetsService:
                 continue
             try:
                 user_id = int(row[_COL_USER_ID])
-                points = int(row[_COL_POINTS])
+                points = float(row[_COL_POINTS])
             except (ValueError, IndexError):
                 continue
             parsed.append(

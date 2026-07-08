@@ -126,7 +126,7 @@ Row 1 is a fixed header row. All subsequent rows are one confirmed & awarded wor
 | D | `display_name` | string | Full name: `first_name` + `last_name` (trimmed). |
 | E | `workout_date` | string (ISO date) | `YYYY-MM-DD` extracted by Claude (the activity date). |
 | F | `activity_type` | string | Lowercase enum: `running` for workouts, or `streak_bonus` for weekly streak-bonus rows. |
-| G | `points` | integer | Points awarded (plan-based per-workout value, or the streak bonus for `streak_bonus` rows). |
+| G | `points` | number | Points awarded (plan-based per-workout value — an exact fraction like `7.5`, or the streak bonus for `streak_bonus` rows). Written with a dot decimal (never a locale comma) and trimmed of trailing zeros (`15`, `7.5`, `3.75`). |
 | H | `image_hash` | string | SHA-256 hex of downloaded image bytes (dedup key). |
 | I | `telegram_file_id` | string | Telegram `file_id` of the largest photo size. |
 | J | `chat_id` | integer (stored as string) | `message.chat.id`. |
@@ -159,7 +159,7 @@ Auto-created (with its header row) on first run alongside the `Log` worksheet. O
 |-----|--------|------|----------------|
 | A | `telegram_user_id` | integer (stored as string) | The user's Telegram id (upsert key). |
 | B | `telegram_username` | string | `@username` without `@`, or empty. |
-| C | `plan` | integer | Workouts/week target, clamped to `[2, 7]`. Blank/invalid → default `3`. |
+| C | `plan` | integer | Workouts/week target, clamped to `[2, 6]`. Blank/invalid → default `3`. |
 | D | `streak` | integer | Consecutive completed weeks. Blank/invalid → `0`. |
 | E | `updated_at` | string (ISO 8601) | UTC time the row was last written. |
 
@@ -262,7 +262,7 @@ If eligible, proceed to the date-window/points decision (Section 5). Otherwise I
 
 ### Plan-Based Points Model
 
-Each user has a weekly **plan** — the number of workouts/week they aim for — stored in the `Plans` worksheet. Plans are set with `/setplan N` and clamped to `[MIN_PLAN, MAX_PLAN]` = **2–7**; the default is **3** for users who never set one.
+Each user has a weekly **plan** — the number of workouts/week they aim for — stored in the `Plans` worksheet. Plans are set with `/setplan N` and clamped to `[MIN_PLAN, MAX_PLAN]` = **2–6** (five plans: 2, 3, 4, 5, 6); the default is **3** for users who never set one.
 
 Constants live in [`bot/utils/points.py`](bot/utils/points.py):
 
@@ -270,7 +270,7 @@ Constants live in [`bot/utils/points.py`](bot/utils/points.py):
 |----------|-------|---------|
 | `STANDARD_WORKOUTS_PER_WEEK` | 3 | Reference plan. |
 | `STANDARD_POINTS_PER_WEEK` | 30 | Points for completing the plan. |
-| `MIN_PLAN` / `MAX_PLAN` | 2 / 7 | Allowed plan range. |
+| `MIN_PLAN` / `MAX_PLAN` | 2 / 6 | Allowed plan range. |
 | `DEFAULT_PLAN` | 3 | Plan used when a user has no `Plans` row. |
 | `OVERACHIEVEMENT_RATE` | 0.5 | Multiplier for workouts logged **beyond** the plan. |
 | `STREAK_BONUS_PER_WEEK` | `[0,0,0,5,10,15,20]` | Bonus by consecutive completed weeks (capped at last index). |
@@ -283,20 +283,22 @@ if workouts_this_week_so_far < plan:   # within plan
     pts = base_rate
 else:                                   # overachievement
     pts = base_rate * OVERACHIEVEMENT_RATE
-return round(pts)                       # Python banker's rounding
+return round(pts, 2)                     # EXACT fraction (2-dp), NOT rounded to int
 ```
 
-`workouts_this_week_so_far` is how many **running** rows the user already has in the current week BEFORE the new one (streak_bonus rows and other users are excluded). Completing exactly the plan yields ~`STANDARD_POINTS_PER_WEEK` (30) points for the week; extra workouts earn 50% of the base rate. Plan changes apply **going forward only** — already-logged rows keep their points.
+`workouts_this_week_so_far` is how many **running** rows the user already has in the current week BEFORE the new one (streak_bonus rows and other users are excluded). Completing exactly the plan yields exactly `STANDARD_POINTS_PER_WEEK` (30) points for the week; extra workouts earn 50% of the base rate. Points are **exact fractions** (no integer rounding): e.g. plan 4 → `7.5` per workout. Plan changes apply **going forward only** — already-logged rows keep their points.
 
-**Sample per-workout values** (rounded):
+**Display formatting:** a helper `format_points(p)` trims trailing zeros / the decimal point so whole numbers show as `15` (not `15.0`) and fractions as `7.5`/`3.75`. It's used in the `✅` reply, `/setplan`, and the leaderboard totals.
 
-| Plan | Within-plan | Overachievement |
-|------|-------------|-----------------|
-| 2 | 15 | 8 (round(7.5)) |
+**Sample per-workout values** (exact fractions):
+
+| Plan | Within-plan | Overachievement (½) |
+|------|-------------|---------------------|
+| 2 | 15 | 7.5 |
 | 3 | 10 | 5 |
-| 4 | 8 (round(7.5)) | 4 |
+| 4 | 7.5 | 3.75 |
 | 5 | 6 | 3 |
-| 7 | 4 | 2 |
+| 6 | 5 | 2.5 |
 
 ### Decision Pseudocode
 
@@ -408,7 +410,7 @@ function aggregate(rows, range_start, range_end):
         wdate = date.fromisoformat(r.workout_date)
         if range_start <= wdate <= range_end:
             t = totals.setdefault(r.telegram_user_id,
-                                  {"points": 0, "display_name": r.display_name,
+                                  {"points": 0.0, "display_name": r.display_name,
                                    "username": r.telegram_username})
             t["points"] += r.points
             t["display_name"] = r.display_name   # keep latest
@@ -478,7 +480,7 @@ Sam  - 20 points
 
 | Command | Description |
 |---------|-------------|
-| `/setplan N` | Set the caller's weekly plan to `N` workouts/week (`N` in **2–7**). Upserts the user's `Plans` row (preserving streak) and replies with the per-workout point value. Invalid/out-of-range/missing `N` → a short usage message. Works in groups; attributed to the poster. |
+| `/setplan N` | Set the caller's weekly plan to `N` workouts/week (`N` in **2–6**). Upserts the user's `Plans` row (preserving streak) and replies with the per-workout point value (trimmed, e.g. plan 4 → `7.5`). Invalid/out-of-range/missing `N` → a short usage message. Works in groups; attributed to the poster. |
 | `/myplan` | Reply with the caller's current plan + streak (defaults to plan 3 / streak 0 if unset). |
 | `/status` | Consolidated health report (Telegram, Anthropic, Google Sheets, target chat, timezone). |
 | `/testsheet` | Verify Google Sheets connectivity and Editor access. |

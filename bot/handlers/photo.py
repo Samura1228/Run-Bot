@@ -26,7 +26,12 @@ from bot.services.sheets import SheetsService
 from bot.services.vision import ClaudeVisionService
 from bot.utils.dates import current_week_bounds, in_range
 from bot.utils.hashing import compute_image_hash
-from bot.utils.points import DEFAULT_PLAN, resolve_points, workout_points
+from bot.utils.points import (
+    DEFAULT_PLAN,
+    format_points,
+    resolve_points,
+    workout_points,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -224,7 +229,9 @@ class PhotoHandler:
         # the poster's @username, else their display name / first name.
         who = f"@{username}" if username else (display_name or user.first_name or "runner")
         try:
-            await message.reply_text(f"✅ Nice run, {who}! +{points} points.")
+            await message.reply_text(
+                f"✅ Nice run, {who}! +{format_points(points)} points."
+            )
         except TelegramError as exc:
             # The log is already saved; a failed reply must not crash the
             # handler or undo the write. Log and move on.

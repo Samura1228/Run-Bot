@@ -12,6 +12,7 @@ from typing import Any
 
 from bot.models import LeaderboardEntry
 from bot.services.sheets import SheetsService
+from bot.utils.points import format_points
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +42,7 @@ class LeaderboardService:
             entry = totals.setdefault(
                 user_id,
                 {
-                    "points": 0,
+                    "points": 0.0,
                     "display_name": row["display_name"],
                     "telegram_username": row["telegram_username"],
                 },
@@ -75,7 +76,7 @@ class LeaderboardService:
         lines: list[str] = []
         for rank, entry in enumerate(entries, start=1):
             name = entry.label()
-            line = f"{name}  - {entry.points} points"
+            line = f"{name}  - {format_points(entry.points)} points"
             medal = _MEDALS.get(rank)
             if medal:
                 line = f"{line} {medal}"

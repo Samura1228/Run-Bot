@@ -22,7 +22,7 @@ from __future__ import annotations
 STANDARD_WORKOUTS_PER_WEEK = 3
 STANDARD_POINTS_PER_WEEK = 30
 MIN_PLAN = 2
-MAX_PLAN = 7
+MAX_PLAN = 6
 DEFAULT_PLAN = 3
 OVERACHIEVEMENT_RATE = 0.5
 # index = consecutive completed weeks (capped at the last index).
@@ -58,7 +58,7 @@ def clamp_plan(plan: int) -> int:
     return max(MIN_PLAN, min(MAX_PLAN, plan))
 
 
-def workout_points(plan: int, workouts_this_week_so_far: int) -> int:
+def workout_points(plan: int, workouts_this_week_so_far: int) -> float:
     """Return the points for a single workout under the plan-based model.
 
     Args:
@@ -68,8 +68,9 @@ def workout_points(plan: int, workouts_this_week_so_far: int) -> int:
 
     The base rate is ``STANDARD_POINTS_PER_WEEK / plan``. Workouts within the
     plan earn the base rate; workouts beyond the plan earn the base rate times
-    :data:`OVERACHIEVEMENT_RATE`. The result is rounded to the nearest int
-    (Python banker's rounding).
+    :data:`OVERACHIEVEMENT_RATE`. The result is an EXACT fractional value
+    (e.g. plan 4 → 7.5), rounded only to 2 decimals to avoid float noise —
+    it is NOT rounded to an integer.
     """
 
     base_rate = STANDARD_POINTS_PER_WEEK / plan
@@ -77,7 +78,20 @@ def workout_points(plan: int, workouts_this_week_so_far: int) -> int:
         pts = base_rate
     else:
         pts = base_rate * OVERACHIEVEMENT_RATE
-    return round(pts)
+    return round(pts, 2)
+
+
+def format_points(p: float) -> str:
+    """Format a point value for display, trimming trailing zeros/decimal point.
+
+    Whole numbers show without a decimal (``15.0`` → ``"15"``) and fractional
+    values show cleanly (``7.5`` → ``"7.5"``, ``3.75`` → ``"3.75"``). Values are
+    treated with 2-decimal precision to match :func:`workout_points`.
+    """
+
+    text = f"{float(p):.2f}".rstrip("0").rstrip(".")
+    # Guard against "-0" for negative-zero inputs.
+    return text if text not in ("", "-0") else "0"
 
 
 def streak_bonus(streak: int) -> int:

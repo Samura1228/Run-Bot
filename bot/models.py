@@ -17,6 +17,16 @@ from pydantic import BaseModel, Field, field_validator
 ActivityType = Literal["running", "cycling", "walking", "swimming", "other", "unknown"]
 
 _ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+def _format_points_cell(p: float) -> str:
+    """Serialize a point value for the sheet cell as a clean decimal string.
+
+    Writes whole numbers without a decimal (``15.0`` → ``"15"``) and fractions
+    with a dot (``7.5`` → ``"7.5"``), never a locale comma. Mirrors the
+    display-trimming used elsewhere so the ``Log`` sheet stores exact values.
+    """
+
+    text = f"{float(p):.2f}".rstrip("0").rstrip(".")
+    return text if text not in ("", "-0") else "0"
 
 
 class VisionVerdict(BaseModel):
@@ -78,7 +88,7 @@ class WorkoutLogRow(BaseModel):
     display_name: str
     workout_date: str
     activity_type: str
-    points: int
+    points: float
     image_hash: str
     telegram_file_id: str
     chat_id: int
@@ -107,7 +117,7 @@ class WorkoutLogRow(BaseModel):
             self.display_name,
             self.workout_date,
             self.activity_type,
-            str(self.points),
+            _format_points_cell(self.points),
             self.image_hash,
             self.telegram_file_id,
             str(self.chat_id),
@@ -121,7 +131,7 @@ class LeaderboardEntry(BaseModel):
     telegram_user_id: int
     display_name: str
     telegram_username: str
-    points: int
+    points: float
 
     def label(self) -> str:
         """Return the preferred display label: name, else @username, else id."""

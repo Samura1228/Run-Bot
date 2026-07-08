@@ -270,22 +270,22 @@ Sam  - 20 points
 Instead of a flat points-per-run, each user has a weekly **plan** — how many
 workouts/week they aim for — and points scale to that plan.
 
-- **Set your plan:** `/setplan N` where `N` is between **2 and 7** (default is
-  **3** if you never set one). Example: `/setplan 4`.
-- **Completing your plan earns ~30 points/week.** Each workout up to your plan
-  is worth `round(30 / plan)` points:
+- **Set your plan:** `/setplan N` where `N` is between **2 and 6** (five plans:
+  2, 3, 4, 5, 6; default is **3** if you never set one). Example: `/setplan 4`.
+- **Completing your plan earns exactly 30 points/week.** Each workout up to your
+  plan is worth `30 / plan` points — an **exact fraction** (no rounding to whole
+  numbers), shown trimmed (e.g. `7.5`, not `8`; `15`, not `15.0`):
 
   | Plan | Points per workout (within plan) | Beyond plan (50%) |
   |------|:--------------------------------:|:-----------------:|
-  | 2 | 15 | 8 |
+  | 2 | 15 | 7.5 |
   | 3 | 10 | 5 |
-  | 4 | 8 | 4 |
+  | 4 | 7.5 | 3.75 |
   | 5 | 6 | 3 |
-  | 6 | 5 | 3 |
-  | 7 | 4 | 2 |
+  | 6 | 5 | 2.5 |
 
 - **Overachievement:** workouts logged **beyond** your plan in the same week
-  still count, at **50%** of the base rate (rounded).
+  still count, at **50%** of the base rate (also an exact fraction).
 - **Streak bonus:** every Monday the bot checks the previous week. If you
   **completed your plan**, your streak increments; otherwise it resets to 0.
   Consecutive completed weeks award a bonus (added to that week's leaderboard):
@@ -312,9 +312,9 @@ leak secrets — only a concise result is sent to chat.
 **Plan commands:**
 
 - **`/setplan N`** — set your weekly plan to `N` workouts/week (`N` between
-  **2** and **7**). Replies with the per-workout point value; invalid or
-  out-of-range input returns a short usage message. Attributed to whoever sends
-  it, so it works in the group.
+  **2** and **6**). Replies with the per-workout point value (trimmed, e.g. plan
+  4 → `7.5`); invalid or out-of-range input returns a short usage message.
+  Attributed to whoever sends it, so it works in the group.
 - **`/myplan`** — replies with your current plan and streak (defaults to plan 3,
   streak 0 if you've never set one).
 
