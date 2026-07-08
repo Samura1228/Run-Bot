@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import TYPE_CHECKING, Any, Optional
 
 import gspread
@@ -18,6 +18,7 @@ from google.oauth2.service_account import Credentials
 
 from bot.models import WorkoutLogRow
 from bot.utils.dates import in_range
+from bot.utils.points import DEFAULT_PLAN
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from bot.config import Settings
@@ -27,6 +28,7 @@ logger = logging.getLogger(__name__)
 _SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 WORKSHEET_NAME = "Log"
+PLANS_WORKSHEET_NAME = "Plans"
 
 # Append retry policy: up to 3 attempts with exponential backoff (1s, 2s, 4s).
 _APPEND_MAX_ATTEMPTS = 3
@@ -76,8 +78,25 @@ _COL_USER_ID = 1
 _COL_USERNAME = 2
 _COL_DISPLAY_NAME = 3
 _COL_WORKOUT_DATE = 4
+_COL_ACTIVITY_TYPE = 5
 _COL_POINTS = 6
 _COL_IMAGE_HASH = 7
+
+# --- Plans worksheet ------------------------------------------------------ #
+PLANS_HEADER_ROW = [
+    "telegram_user_id",
+    "telegram_username",
+    "plan",
+    "streak",
+    "updated_at",
+]
+
+# Column indices (0-based) for the Plans worksheet.
+_PLAN_COL_USER_ID = 0
+_PLAN_COL_USERNAME = 1
+_PLAN_COL_PLAN = 2
+_PLAN_COL_STREAK = 3
+_PLAN_COL_UPDATED_AT = 4
 
 
 class SheetsService:
@@ -88,6 +107,7 @@ class SheetsService:
         self._sheet_id = sheet_id
         self._client: Optional[gspread.Client] = None
         self._worksheet: Optional[gspread.Worksheet] = None
+        self._plans_worksheet: Optional[gspread.Worksheet] = None
 
     # ------------------------------------------------------------------ #
     # Initialization
@@ -118,6 +138,28 @@ class SheetsService:
 
         self._worksheet = worksheet
 
+        # Ensure the Plans worksheet exists / has the correct header row,
+        # mirroring the Log worksheet auto-create/repair behaviour above.
+        try:
+            plans_ws = spreadsheet.worksheet(PLANS_WORKSHEET_NAME)
+        except gspread.WorksheetNotFound:
+            plans_ws = spreadsheet.add_worksheet(
+                title=PLANS_WORKSHEET_NAME, rows=1000, cols=len(PLANS_HEADER_ROW)
+            )
+            plans_ws.update(values=[PLANS_HEADER_ROW], range_name="A1")
+            logger.info(
+                "Created worksheet %r with header row.", PLANS_WORKSHEET_NAME
+            )
+        else:
+            existing_plans = plans_ws.row_values(1)
+            if existing_plans != PLANS_HEADER_ROW:
+                plans_ws.update(values=[PLANS_HEADER_ROW], range_name="A1")
+                logger.info(
+                    "Reset header row on worksheet %r.", PLANS_WORKSHEET_NAME
+                )
+
+        self._plans_worksheet = plans_ws
+
     async def initialize(self) -> None:
         """Authorize and prepare the worksheet (creating it if missing)."""
 
@@ -128,6 +170,11 @@ class SheetsService:
         if self._worksheet is None:
             raise RuntimeError("SheetsService not initialized; call initialize().")
         return self._worksheet
+
+    def _require_plans_worksheet(self) -> gspread.Worksheet:
+        if self._plans_worksheet is None:
+            raise RuntimeError("SheetsService not initialized; call initialize().")
+        return self._plans_worksheet
 
     # ------------------------------------------------------------------ #
     # Reads
@@ -197,6 +244,312 @@ class SheetsService:
                 }
             )
         return parsed
+
+    async def count_user_workouts_in_week(
+        self, user_id: int, week_start: date, week_end: date
+    ) -> int:
+        """Count a user's running workouts logged within a Mon–Sun week.
+
+        Only rows with ``activity_type == "running"`` are counted; special rows
+        such as ``streak_bonus`` and rows for other users are excluded. Used by
+        the per-workout points calculation and the weekly streak rollover.
+        """
+
+        rows = await asyncio.to_thread(self._read_all_records_sync)
+        user_id_str = str(user_id)
+        count = 0
+
+        for row in rows[1:]:  # skip header
+            if len(row) <= _COL_POINTS:
+                continue
+            if row[_COL_USER_ID] != user_id_str:
+                continue
+            if row[_COL_ACTIVITY_TYPE] != "running":
+                continue
+            try:
+                wdate = date.fromisoformat(row[_COL_WORKOUT_DATE])
+            except (ValueError, IndexError):
+                continue
+            if in_range(wdate, week_start, week_end):
+                count += 1
+        return count
+
+    async def has_streak_bonus_for_date(
+        self, user_id: int, bonus_date: date
+    ) -> bool:
+        """Return True if a ``streak_bonus`` row already exists for the user/date.
+
+        Used by the weekly rollover to avoid double-awarding a streak bonus if
+        the scheduler misfires/coalesces and re-runs the same Monday.
+        """
+
+        rows = await asyncio.to_thread(self._read_all_records_sync)
+        user_id_str = str(user_id)
+        bonus_date_str = bonus_date.isoformat()
+
+        for row in rows[1:]:  # skip header
+            if len(row) <= _COL_POINTS:
+                continue
+            if row[_COL_USER_ID] != user_id_str:
+                continue
+            if row[_COL_ACTIVITY_TYPE] != "streak_bonus":
+                continue
+            if row[_COL_WORKOUT_DATE] == bonus_date_str:
+                return True
+        return False
+
+    # ------------------------------------------------------------------ #
+    # Plans worksheet reads/writes
+    # ------------------------------------------------------------------ #
+    def _read_all_plans_sync(self) -> list[list[str]]:
+        """Return all Plans rows (including header) as lists of strings."""
+
+        worksheet = self._require_plans_worksheet()
+        return worksheet.get_all_values()
+
+    @staticmethod
+    def _parse_plan_cell(value: str) -> int:
+        """Parse a ``plan`` cell, returning :data:`DEFAULT_PLAN` if blank/invalid."""
+
+        try:
+            return int(str(value).strip())
+        except (ValueError, TypeError):
+            return DEFAULT_PLAN
+
+    @staticmethod
+    def _parse_streak_cell(value: str) -> int:
+        """Parse a ``streak`` cell, returning 0 if blank/invalid."""
+
+        try:
+            return int(str(value).strip())
+        except (ValueError, TypeError):
+            return 0
+
+    def _find_plan_row_index_sync(self, user_id: int) -> Optional[int]:
+        """Return the 1-based sheet row index for a user, or ``None`` if absent.
+
+        Reads all Plans rows and scans for a matching id. The returned index is
+        suitable for ``update`` range names (header is row 1, data starts at 2).
+        """
+
+        worksheet = self._require_plans_worksheet()
+        rows = worksheet.get_all_values()
+        user_id_str = str(user_id)
+        for offset, row in enumerate(rows[1:], start=2):  # data rows are 1-based+header
+            if len(row) <= _PLAN_COL_USER_ID:
+                continue
+            if row[_PLAN_COL_USER_ID] == user_id_str:
+                return offset
+        return None
+
+    async def get_plan_record(
+        self, user_id: int
+    ) -> Optional[dict[str, int]]:
+        """Return ``{"plan": int, "streak": int}`` for a user, or ``None``.
+
+        A missing/blank ``plan`` cell yields :data:`DEFAULT_PLAN`; a missing
+        ``streak`` yields 0.
+        """
+
+        rows = await asyncio.to_thread(self._read_all_plans_sync)
+        user_id_str = str(user_id)
+        for row in rows[1:]:  # skip header
+            if len(row) <= _PLAN_COL_USER_ID:
+                continue
+            if row[_PLAN_COL_USER_ID] != user_id_str:
+                continue
+            plan_cell = (
+                row[_PLAN_COL_PLAN] if len(row) > _PLAN_COL_PLAN else ""
+            )
+            streak_cell = (
+                row[_PLAN_COL_STREAK] if len(row) > _PLAN_COL_STREAK else ""
+            )
+            return {
+                "plan": self._parse_plan_cell(plan_cell),
+                "streak": self._parse_streak_cell(streak_cell),
+            }
+        return None
+
+    async def get_plan(self, user_id: int) -> int:
+        """Return the user's plan, or :data:`DEFAULT_PLAN` if no row exists."""
+
+        record = await self.get_plan_record(user_id)
+        if record is None:
+            return DEFAULT_PLAN
+        return record["plan"]
+
+    async def get_streak(self, user_id: int) -> int:
+        """Return the user's streak, or 0 if no row exists."""
+
+        record = await self.get_plan_record(user_id)
+        if record is None:
+            return 0
+        return record["streak"]
+
+    async def list_plans(self) -> list[dict[str, Any]]:
+        """Return all plan rows as dicts.
+
+        Each dict has: ``user_id`` (int), ``username`` (str), ``plan`` (int),
+        ``streak`` (int). Rows with an unparseable id are skipped.
+        """
+
+        rows = await asyncio.to_thread(self._read_all_plans_sync)
+        parsed: list[dict[str, Any]] = []
+        for row in rows[1:]:  # skip header
+            if len(row) <= _PLAN_COL_USER_ID:
+                continue
+            raw_id = row[_PLAN_COL_USER_ID].strip()
+            if not raw_id:
+                continue
+            try:
+                user_id = int(raw_id)
+            except ValueError:
+                continue
+            username = (
+                row[_PLAN_COL_USERNAME] if len(row) > _PLAN_COL_USERNAME else ""
+            )
+            plan_cell = row[_PLAN_COL_PLAN] if len(row) > _PLAN_COL_PLAN else ""
+            streak_cell = (
+                row[_PLAN_COL_STREAK] if len(row) > _PLAN_COL_STREAK else ""
+            )
+            parsed.append(
+                {
+                    "user_id": user_id,
+                    "username": username,
+                    "plan": self._parse_plan_cell(plan_cell),
+                    "streak": self._parse_streak_cell(streak_cell),
+                }
+            )
+        return parsed
+
+    @staticmethod
+    def _now_iso() -> str:
+        """Return the current UTC time as an ISO 8601 string (e.g. ``...Z``)."""
+
+        return (
+            datetime.now(timezone.utc)
+            .replace(microsecond=0)
+            .strftime("%Y-%m-%dT%H:%M:%SZ")
+        )
+
+    def _upsert_plan_sync(
+        self, user_id: int, username: str, plan: int, streak: int
+    ) -> None:
+        """Blocking upsert of a Plans row (update if present, else append)."""
+
+        worksheet = self._require_plans_worksheet()
+        row_values = [
+            str(user_id),
+            username,
+            str(plan),
+            str(streak),
+            self._now_iso(),
+        ]
+        index = self._find_plan_row_index_sync(user_id)
+        if index is None:
+            worksheet.append_row(row_values, value_input_option="RAW")
+        else:
+            worksheet.update(
+                values=[row_values],
+                range_name=f"A{index}:E{index}",
+                value_input_option="RAW",
+            )
+
+    async def set_plan(self, user_id: int, username: str, plan: int) -> None:
+        """Upsert a user's plan, preserving their existing streak (default 0).
+
+        ``plan`` is assumed already clamped by the caller. All blocking gspread
+        calls run in :func:`asyncio.to_thread`; transient failures are retried
+        with the same backoff policy as :meth:`append_workout`.
+        """
+
+        existing = await self.get_plan_record(user_id)
+        streak = existing["streak"] if existing is not None else 0
+        await self._retry_blocking(
+            self._upsert_plan_sync,
+            user_id,
+            username,
+            plan,
+            streak,
+            label=f"set_plan user={user_id}",
+        )
+
+    async def set_streak(
+        self,
+        user_id: int,
+        streak: int,
+        username: Optional[str] = None,
+        plan: Optional[int] = None,
+    ) -> None:
+        """Upsert a user's streak, preserving their plan/username by default.
+
+        When ``username``/``plan`` are provided they override the stored values
+        (used by the weekly rollover for users with no prior plan row). Blocking
+        calls run in :func:`asyncio.to_thread` with transient-retry.
+        """
+
+        existing = await self.get_plan_record(user_id)
+        resolved_plan = plan if plan is not None else (
+            existing["plan"] if existing is not None else DEFAULT_PLAN
+        )
+        # Preserve existing username unless an override is supplied. We must read
+        # the raw username cell for that user; get_plan_record doesn't return it,
+        # so fetch from list_plans lazily only when needed.
+        resolved_username = username
+        if resolved_username is None:
+            resolved_username = ""
+            for entry in await self.list_plans():
+                if entry["user_id"] == user_id:
+                    resolved_username = entry["username"]
+                    break
+        await self._retry_blocking(
+            self._upsert_plan_sync,
+            user_id,
+            resolved_username,
+            resolved_plan,
+            streak,
+            label=f"set_streak user={user_id}",
+        )
+
+    async def _retry_blocking(
+        self, func: Any, *args: Any, label: str = "operation"
+    ) -> None:
+        """Run a blocking callable in a thread with transient-retry/backoff.
+
+        Mirrors :meth:`append_workout`'s retry policy for Plans upserts.
+        """
+
+        for attempt in range(1, _APPEND_MAX_ATTEMPTS + 1):
+            try:
+                await asyncio.to_thread(func, *args)
+            except Exception as exc:
+                if not _is_transient_error(exc):
+                    logger.error(
+                        "%s failed with a permanent error: %s", label, exc
+                    )
+                    raise
+                if attempt < _APPEND_MAX_ATTEMPTS:
+                    backoff = _APPEND_BACKOFF_BASE_SECONDS * (2 ** (attempt - 1))
+                    logger.warning(
+                        "Transient failure for %s (attempt %d/%d): %s; "
+                        "retrying in %.1fs.",
+                        label,
+                        attempt,
+                        _APPEND_MAX_ATTEMPTS,
+                        exc,
+                        backoff,
+                    )
+                    await asyncio.sleep(backoff)
+                    continue
+                logger.error(
+                    "%s failed after %d attempts: %s",
+                    label,
+                    _APPEND_MAX_ATTEMPTS,
+                    exc,
+                )
+                raise
+            else:
+                return
 
     # ------------------------------------------------------------------ #
     # Writes

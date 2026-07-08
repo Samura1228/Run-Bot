@@ -12,8 +12,8 @@
 1. Joins a Telegram group and passively listens to all messages.
 2. On any **photo** message, downloads the image, hashes the raw bytes (dedup), and sends it to **Claude vision**.
 3. Claude returns a **strict JSON verdict** (is it a Garmin running screenshot, completed, with a workout date, etc.).
-4. The bot applies **points/date-window logic**: if the workout date falls in the **current Mon–Sun week** (Europe/Nicosia) → award **10 points**, log the run to Google Sheets (row written first, then an INFO log line), and reply in chat with `✅ Nice run, {name}! +{points} points.`. Otherwise → silently ignore.
-5. An **APScheduler** (AsyncIOScheduler, timezone `Europe/Nicosia`) runs on the same event loop and posts a **weekly leaderboard** (Monday 09:00) and a **monthly leaderboard** (1st of month 09:00).
+4. The bot applies **plan-based points/date-window logic**: if the workout date falls in the **current Mon–Sun week** (Europe/Nicosia) → award points based on the user's **weekly plan** (see Section 5), log the run to Google Sheets (row written first, then an INFO log line), and reply in chat with `✅ Nice run, {name}! +{points} points.`. Otherwise → silently ignore.
+5. An **APScheduler** (AsyncIOScheduler, timezone `Europe/Nicosia`) runs on the same event loop and posts a **weekly leaderboard** (Monday 09:00) and a **monthly leaderboard** (1st of month 09:00). The weekly job also performs a **streak rollover** (awarding streak bonuses) just before posting the board.
 6. **Google Sheets is the single source of truth.** Leaderboards are computed by reading and aggregating the sheet, so restarts lose no data.
 
 ### Component Diagram
@@ -30,7 +30,7 @@ flowchart TD
     VIS --> VER[Parse & validate JSON verdict]
     VER --> DEC{Decision:<br/>Garmin + running +<br/>completed + in current week?}
     DEC -->|no / low confidence / parse fail| IGN2[Silently ignore]
-    DEC -->|yes| AWARD[Award 10 points]
+    DEC -->|yes| AWARD[Award plan-based points]
     AWARD --> SHEET[(Google Sheet<br/>source of truth)]
     AWARD --> LOG[INFO log + chat reply<br/>after Sheet write]
 
@@ -106,7 +106,7 @@ run-bot/
 | [`bot/services/leaderboard.py`](bot/services/leaderboard.py) | Aggregate points per user for a date range; format weekly/monthly messages. |
 | [`bot/utils/dates.py`](bot/utils/dates.py) | Compute current/previous Mon–Sun week and previous calendar month in Europe/Nicosia. |
 | [`bot/utils/hashing.py`](bot/utils/hashing.py) | Deterministic image byte hashing for dedup. |
-| [`bot/utils/points.py`](bot/utils/points.py) | `ACTIVITY_POINTS` mapping and points resolution (running=10; extensible). |
+| [`bot/utils/points.py`](bot/utils/points.py) | Plan-based points model: constants, `workout_points()` (base + overachievement) and `streak_bonus()`; the `ACTIVITY_POINTS` mapping now only gates awardable activity types (running). |
 
 ---
 
@@ -125,8 +125,8 @@ Row 1 is a fixed header row. All subsequent rows are one confirmed & awarded wor
 | C | `telegram_username` | string | `@username` without `@`, or empty if none. |
 | D | `display_name` | string | Full name: `first_name` + `last_name` (trimmed). |
 | E | `workout_date` | string (ISO date) | `YYYY-MM-DD` extracted by Claude (the activity date). |
-| F | `activity_type` | string | Lowercase enum, currently always `running`. |
-| G | `points` | integer | Points awarded, currently always `10`. |
+| F | `activity_type` | string | Lowercase enum: `running` for workouts, or `streak_bonus` for weekly streak-bonus rows. |
+| G | `points` | integer | Points awarded (plan-based per-workout value, or the streak bonus for `streak_bonus` rows). |
 | H | `image_hash` | string | SHA-256 hex of downloaded image bytes (dedup key). |
 | I | `telegram_file_id` | string | Telegram `file_id` of the largest photo size. |
 | J | `chat_id` | integer (stored as string) | `message.chat.id`. |
@@ -144,7 +144,26 @@ timestamp | telegram_user_id | telegram_username | display_name | workout_date |
 2026-07-01T18:37:53Z | 123456789 | jrunner | Jane Runner | 2026-06-30 | running | 10 | 9f2c1a...e4 | AgACAgQAAx... | -1001234567890 | 4521
 ```
 
+**Example `streak_bonus` row** (written by the Monday rollover; dated to the previous week's Sunday, with placeholder hash/file id):
+```
+2026-07-06T06:00:03Z | 123456789 | jrunner |  | 2026-07-05 | streak_bonus | 5 | - | - | 0 | 0
+```
+
 > **Note on storage types:** Google Sheets stores everything as cells; the "type" column indicates the logical type. IDs are written as **plain text** (leading apostrophe or explicitly value-input as string) to avoid precision loss on large integers.
+
+### Worksheet: `Plans` (per-user weekly plans & streaks)
+
+Auto-created (with its header row) on first run alongside the `Log` worksheet. One row per user; IDs stored as plain text (RAW).
+
+| Col | Header | Type | Notes / Format |
+|-----|--------|------|----------------|
+| A | `telegram_user_id` | integer (stored as string) | The user's Telegram id (upsert key). |
+| B | `telegram_username` | string | `@username` without `@`, or empty. |
+| C | `plan` | integer | Workouts/week target, clamped to `[2, 7]`. Blank/invalid → default `3`. |
+| D | `streak` | integer | Consecutive completed weeks. Blank/invalid → `0`. |
+| E | `updated_at` | string (ISO 8601) | UTC time the row was last written. |
+
+**Upsert key:** `telegram_user_id`. `/setplan` updates the row if present (preserving `streak`), else appends a new one. The Monday rollover updates `streak` (preserving `plan`/`username`).
 
 ---
 
@@ -241,9 +260,43 @@ If eligible, proceed to the date-window/points decision (Section 5). Otherwise I
 
 > Because comparison is date-based (not datetime), there is no ambiguity around midnight or DST for the eligibility check; the Europe/Nicosia timezone is only used to determine what "today" is.
 
-### Points Resolution
+### Plan-Based Points Model
 
-- `ACTIVITY_POINTS = {"running": 10}` in [`bot/utils/points.py`](bot/utils/points.py). Extensible: other activity types can be added later, but only `running` is currently mapped, so anything else yields no award.
+Each user has a weekly **plan** — the number of workouts/week they aim for — stored in the `Plans` worksheet. Plans are set with `/setplan N` and clamped to `[MIN_PLAN, MAX_PLAN]` = **2–7**; the default is **3** for users who never set one.
+
+Constants live in [`bot/utils/points.py`](bot/utils/points.py):
+
+| Constant | Value | Meaning |
+|----------|-------|---------|
+| `STANDARD_WORKOUTS_PER_WEEK` | 3 | Reference plan. |
+| `STANDARD_POINTS_PER_WEEK` | 30 | Points for completing the plan. |
+| `MIN_PLAN` / `MAX_PLAN` | 2 / 7 | Allowed plan range. |
+| `DEFAULT_PLAN` | 3 | Plan used when a user has no `Plans` row. |
+| `OVERACHIEVEMENT_RATE` | 0.5 | Multiplier for workouts logged **beyond** the plan. |
+| `STREAK_BONUS_PER_WEEK` | `[0,0,0,5,10,15,20]` | Bonus by consecutive completed weeks (capped at last index). |
+
+**Per-workout points** (`workout_points(plan, workouts_this_week_so_far)`):
+
+```python
+base_rate = STANDARD_POINTS_PER_WEEK / plan
+if workouts_this_week_so_far < plan:   # within plan
+    pts = base_rate
+else:                                   # overachievement
+    pts = base_rate * OVERACHIEVEMENT_RATE
+return round(pts)                       # Python banker's rounding
+```
+
+`workouts_this_week_so_far` is how many **running** rows the user already has in the current week BEFORE the new one (streak_bonus rows and other users are excluded). Completing exactly the plan yields ~`STANDARD_POINTS_PER_WEEK` (30) points for the week; extra workouts earn 50% of the base rate. Plan changes apply **going forward only** — already-logged rows keep their points.
+
+**Sample per-workout values** (rounded):
+
+| Plan | Within-plan | Overachievement |
+|------|-------------|-----------------|
+| 2 | 15 | 8 (round(7.5)) |
+| 3 | 10 | 5 |
+| 4 | 8 (round(7.5)) | 4 |
+| 5 | 6 | 3 |
+| 7 | 4 | 2 |
 
 ### Decision Pseudocode
 
@@ -255,9 +308,8 @@ function decide_and_process(message, verdict, image_hash):
             and verdict.confidence >= MIN_CONFIDENCE):
         return IGNORE   # silent
 
-    points = ACTIVITY_POINTS.get(verdict.activity_type, 0)
-    if points == 0:
-        return IGNORE   # silent (future-proofing)
+    if ACTIVITY_POINTS.get(verdict.activity_type, 0) == 0:
+        return IGNORE   # silent (gate: running only)
 
     tz = ZoneInfo("Europe/Nicosia")
     today = datetime.now(tz).date()
@@ -272,6 +324,10 @@ function decide_and_process(message, verdict, image_hash):
     if sheets.exists(user_id=message.from_user.id, image_hash=image_hash):
         return IGNORE   # silent
 
+    plan = sheets.get_plan(user_id)                        # default 3
+    so_far = sheets.count_user_workouts_in_week(user_id, week_start, week_end)
+    points = workout_points(plan, so_far)                  # plan-based value
+
     row = build_log_row(message, verdict, points, image_hash)
     sheets.append_row(row)                     # real-time log (write-first)
     logger.info("Logged workout: user=%s date=%s points=%s", ...)
@@ -280,7 +336,18 @@ function decide_and_process(message, verdict, image_hash):
 ```
 
 
-**Write-first, then reply:** on success the row is written to the Sheet and an INFO log line `Logged workout: user=... date=... points=10` is emitted; **only after** the confirmed write does the bot reply in chat with `✅ Nice run, {name}! +{points} points.`. A failed reply is logged but never undoes the saved row. Failures/ignored images remain silent. (Weekly/monthly leaderboards are still posted to the group.)
+**Write-first, then reply:** on success the row is written to the Sheet and an INFO log line `Logged workout: user=... date=... points=<computed>` is emitted; **only after** the confirmed write does the bot reply in chat with `✅ Nice run, {name}! +{points} points.`. A failed reply is logged but never undoes the saved row. Failures/ignored images remain silent. (Weekly/monthly leaderboards are still posted to the group.)
+
+### Streak Bonus (weekly rollover)
+
+At the Monday 09:00 weekly job — **before** the leaderboard is aggregated/posted so it's reflected in that week's board — the bot evaluates the **previous** Mon–Sun week:
+
+1. For each user in `Plans` (plus any user who logged running workouts last week but has no plan row → treated as `DEFAULT_PLAN`), count their completed running workouts.
+2. If `completed >= plan` → `streak += 1`; else `streak = 0`. The new streak is persisted to `Plans`.
+3. If `streak >= 1` and `STREAK_BONUS_PER_WEEK[min(streak, len-1)] > 0`, a `streak_bonus` row is appended to `Log` with `points = bonus`, `workout_date` = the previous week's **Sunday** (so it counts in that week), and placeholder hash/file id (`-`).
+4. **Idempotency:** before awarding, the bot checks `Log` for an existing `streak_bonus` row for that user dated to the same previous-week Sunday and skips if found, preventing double-awarding on scheduler misfire/coalesce.
+
+Each evaluation logs `Streak: user=<id> completed=<n>/<plan> streak=<new> bonus=<b>`. Because the leaderboard sums **all** `Log` rows in range regardless of `activity_type`, `streak_bonus` points are automatically included in the totals — while the per-user workout **count** used for streak/overachievement still counts **running** rows only (the two concerns are kept separate).
 ---
 
 ## 6. Scheduling Design
@@ -296,7 +363,7 @@ function decide_and_process(message, verdict, image_hash):
 
 | Job | Trigger | Fires | Action |
 |-----|---------|-------|--------|
-| Weekly leaderboard | `CronTrigger(day_of_week="mon", hour=9, minute=0, timezone=tz)` | Monday 09:00 | Post ranked totals for the **previous** Mon–Sun week. |
+| Weekly leaderboard | `CronTrigger(day_of_week="mon", hour=9, minute=0, timezone=tz)` | Monday 09:00 | Run the **streak rollover** (award `streak_bonus` rows), then post ranked totals for the **previous** Mon–Sun week. |
 | Monthly leaderboard | `CronTrigger(day=1, hour=9, minute=0, timezone=tz)` | 1st of month 09:00 | Post ranked totals for the **previous** full calendar month. |
 
 ### Setup Pseudocode ([`bot/services/scheduler.py`](bot/services/scheduler.py))
@@ -329,9 +396,9 @@ def build_scheduler(bot, sheets, leaderboard, target_chat_id, tz):
 
 ### Aggregation ([`bot/services/leaderboard.py`](bot/services/leaderboard.py))
 
-1. Read all rows from worksheet `Log` (via `SheetsService.read_all()`), skipping the header.
+1. Read all rows from worksheet `Log` (via `SheetsService.read_rows_in_range()`), skipping the header.
 2. Filter rows where `workout_date` (column E) falls in `[range_start, range_end]` (inclusive dates).
-3. Group by `telegram_user_id`; sum `points`; keep the most recent `display_name`/`telegram_username` for that user id.
+3. Group by `telegram_user_id`; sum `points` for **all** rows in range **regardless of `activity_type`** (so `running` workout points **and** `streak_bonus` points both count); keep the most recent `display_name`/`telegram_username` for that user id.
 4. Sort descending by total points; tie-break by `display_name` alphabetically.
 
 ```
@@ -402,10 +469,20 @@ Sam  - 20 points
 | `TARGET_CHAT_ID` | yes | Telegram chat/group id where leaderboards are posted (e.g. `-1001234567890`). |
 | `TIMEZONE` | no | IANA timezone; default `Europe/Nicosia`. Used by scheduler & date logic. |
 | `MIN_CONFIDENCE` | no | Float threshold (default `0.6`) below which vision verdicts are ignored. |
-| `POINTS_PER_RUN` | no | Override for running points (default `10`). |
+| `POINTS_PER_RUN` | no | Legacy gate value (default `10`). Under the plan-based model this no longer sets the per-workout points — it only ensures `running` is an awardable activity type; actual points come from `workout_points()` (see Section 5). |
 | `LOG_LEVEL` | no | Logging verbosity (default `INFO`). |
 
 **Validation:** [`bot/config.py`](bot/config.py) fails fast at startup if any required variable is missing or malformed (e.g. `GOOGLE_SERVICE_ACCOUNT_JSON` not valid JSON, `TARGET_CHAT_ID` not an int).
+
+### Slash Commands
+
+| Command | Description |
+|---------|-------------|
+| `/setplan N` | Set the caller's weekly plan to `N` workouts/week (`N` in **2–7**). Upserts the user's `Plans` row (preserving streak) and replies with the per-workout point value. Invalid/out-of-range/missing `N` → a short usage message. Works in groups; attributed to the poster. |
+| `/myplan` | Reply with the caller's current plan + streak (defaults to plan 3 / streak 0 if unset). |
+| `/status` | Consolidated health report (Telegram, Anthropic, Google Sheets, target chat, timezone). |
+| `/testsheet` | Verify Google Sheets connectivity and Editor access. |
+| `/chatid` | Reply with the current chat's ID for `TARGET_CHAT_ID`. |
 
 ---
 

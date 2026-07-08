@@ -26,7 +26,7 @@ from bot.services.sheets import SheetsService
 from bot.services.vision import ClaudeVisionService
 from bot.utils.dates import current_week_bounds, in_range
 from bot.utils.hashing import compute_image_hash
-from bot.utils.points import resolve_points
+from bot.utils.points import DEFAULT_PLAN, resolve_points, workout_points
 
 logger = logging.getLogger(__name__)
 
@@ -109,8 +109,9 @@ class PhotoHandler:
             )
             return
 
-        points = resolve_points(verdict.activity_type, self._activity_points)
-        if points == 0:
+        # Gate: only awardable activity types (running) proceed. The actual
+        # per-workout point value comes from the plan-based helper below.
+        if resolve_points(verdict.activity_type, self._activity_points) == 0:
             logger.info(
                 "Activity type %r has no points mapping; ignoring.",
                 verdict.activity_type,
@@ -145,6 +146,35 @@ class PhotoHandler:
                 return
         except Exception as exc:
             logger.error("Race-safe dedup re-check failed: %s", exc)
+
+        # 7b) Plan-based points: fetch the user's plan and count how many running
+        # workouts they've ALREADY logged this current week (excluding this one
+        # and excluding streak_bonus rows / other users), then compute points.
+        try:
+            plan = await self._sheets.get_plan(user.id)
+        except Exception as exc:
+            logger.error(
+                "Failed to fetch plan for user %s; using default: %s",
+                user.id,
+                exc,
+            )
+            plan = None
+        if plan is None:
+            plan = DEFAULT_PLAN
+
+        try:
+            workouts_so_far = await self._sheets.count_user_workouts_in_week(
+                user.id, week_start, week_end
+            )
+        except Exception as exc:
+            logger.error(
+                "Failed to count this-week workouts for user %s; assuming 0: %s",
+                user.id,
+                exc,
+            )
+            workouts_so_far = 0
+
+        points = workout_points(plan, workouts_so_far)
 
         # 8) Build the row and append.
         username = (user.username or "").strip()

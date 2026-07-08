@@ -22,6 +22,8 @@ from telegram.ext import (
 from bot.config import ConfigError, Settings, get_settings
 from bot.handlers.commands import (
     chatid_command,
+    myplan_command,
+    setplan_command,
     status_command,
     testsheet_command,
 )
@@ -78,6 +80,8 @@ def build_application(settings: Settings) -> Application:
     application.add_handler(CommandHandler("chatid", chatid_command))
     application.add_handler(CommandHandler("testsheet", testsheet_command))
     application.add_handler(CommandHandler("status", status_command))
+    application.add_handler(CommandHandler("setplan", setplan_command))
+    application.add_handler(CommandHandler("myplan", myplan_command))
 
     # Register a global error handler so exceptions in the update loop are
     # logged cleanly (and Conflict is special-cased) instead of bubbling up.
@@ -96,6 +100,7 @@ def build_application(settings: Settings) -> Application:
         scheduler = build_scheduler(
             bot=app.bot,
             leaderboard=leaderboard,
+            sheets=sheets,
             target_chat_id=settings.target_chat_id,
             tz=settings.timezone,
         )

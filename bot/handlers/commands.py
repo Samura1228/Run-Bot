@@ -27,9 +27,20 @@ from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
 from bot.config import Settings
-from bot.services.sheets import check_sheets
+from bot.services.sheets import SheetsService, check_sheets
+from bot.utils.points import (
+    MAX_PLAN,
+    MIN_PLAN,
+    STANDARD_POINTS_PER_WEEK,
+    clamp_plan,
+)
 
 logger = logging.getLogger(__name__)
+
+_SETPLAN_USAGE = (
+    f"Usage: /setplan N  (N between {MIN_PLAN} and {MAX_PLAN} "
+    "workouts per week)"
+)
 
 
 async def chatid_command(
@@ -82,6 +93,122 @@ def _get_settings(context: ContextTypes.DEFAULT_TYPE) -> Optional[Settings]:
         return settings
     logger.error("Settings not found in bot_data; diagnostics unavailable.")
     return None
+
+
+def _get_sheets(context: ContextTypes.DEFAULT_TYPE) -> Optional[SheetsService]:
+    """Return the shared :class:`SheetsService` stashed in ``bot_data`` by main."""
+
+    sheets = context.application.bot_data.get("sheets")
+    if isinstance(sheets, SheetsService):
+        return sheets
+    logger.error("SheetsService not found in bot_data; plan commands unavailable.")
+    return None
+
+
+async def setplan_command(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Set the caller's weekly plan (workouts/week) via ``/setplan N``.
+
+    Registered with ``CommandHandler("setplan", setplan_command)``; PTB also
+    matches the ``/setplan@BotUsername N`` form. The integer argument must be
+    within ``[MIN_PLAN, MAX_PLAN]`` (2–7); otherwise a short usage/error message
+    is sent. On success the user's Plans row is upserted (preserving streak) and
+    a confirmation with the per-workout point value is returned. Attributed to
+    ``message.from_user`` so it works in group chats.
+    """
+
+    message = update.effective_message
+    if message is None:
+        return
+    user = message.from_user
+    if user is None:
+        return
+
+    # Parse the integer argument. context.args holds tokens after the command.
+    args = context.args or []
+    if len(args) != 1:
+        await _safe_reply(message, _SETPLAN_USAGE)
+        return
+    try:
+        requested = int(args[0])
+    except ValueError:
+        await _safe_reply(message, _SETPLAN_USAGE)
+        return
+    if not (MIN_PLAN <= requested <= MAX_PLAN):
+        await _safe_reply(message, _SETPLAN_USAGE)
+        return
+
+    sheets = _get_sheets(context)
+    if sheets is None:
+        await _safe_reply(message, "❌ Could not set plan — internal error, see logs.")
+        return
+
+    plan = clamp_plan(requested)
+    username = (user.username or "").strip()
+    try:
+        await sheets.set_plan(user.id, username, plan)
+    except Exception as exc:
+        logger.error("Failed to set plan for user %s: %s", user.id, exc)
+        await _safe_reply(message, "❌ Could not set plan — please try again later.")
+        return
+
+    per_workout = round(STANDARD_POINTS_PER_WEEK / plan)
+    await _safe_reply(
+        message,
+        f"✅ Plan set: {plan} workouts/week. Points per workout: "
+        f"{per_workout} (complete your plan for ~{STANDARD_POINTS_PER_WEEK} "
+        "pts/week).",
+    )
+
+
+async def myplan_command(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Reply with the caller's current plan and streak via ``/myplan``.
+
+    Defaults to the default plan (3) with a 0-week streak if the user has no
+    Plans row yet. Attributed to ``message.from_user`` so it works in groups.
+    """
+
+    message = update.effective_message
+    if message is None:
+        return
+    user = message.from_user
+    if user is None:
+        return
+
+    sheets = _get_sheets(context)
+    if sheets is None:
+        await _safe_reply(message, "❌ Could not read plan — internal error, see logs.")
+        return
+
+    try:
+        record = await sheets.get_plan_record(user.id)
+    except Exception as exc:
+        logger.error("Failed to read plan for user %s: %s", user.id, exc)
+        await _safe_reply(message, "❌ Could not read plan — please try again later.")
+        return
+
+    from bot.utils.points import DEFAULT_PLAN
+
+    plan = record["plan"] if record is not None else DEFAULT_PLAN
+    streak = record["streak"] if record is not None else 0
+    await _safe_reply(
+        message,
+        f"Your plan: {plan} workouts/week · streak: {streak} weeks.",
+    )
+
+
+async def _safe_reply(message, text: str) -> None:
+    """Send a plain-text reply, swallowing/ logging any Telegram failure."""
+
+    try:
+        await message.reply_text(text)
+    except TelegramError as exc:
+        logger.error("Failed to send reply: %s", exc)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.error("Unexpected error sending reply: %s", exc)
 
 
 async def _check_anthropic(settings: Settings) -> tuple[str, str]:

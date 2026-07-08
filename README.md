@@ -7,12 +7,13 @@ whenever someone posts a **photo**, it:
 2. Sends it to **Claude vision** to check whether it's a **completed Garmin
    Connect running screenshot** and extract the workout date.
 3. If it's a valid run **dated within the current Mon–Sun week** (Cyprus time),
-   it awards **points** and logs the run to a **Google Sheet** (the row is
-   written first), then replies in chat with
-   `✅ Nice run, {name}! +{points} points.`. Otherwise it silently ignores the
-   photo.
+   it awards **plan-based points** (see [Points & plans](#points--plans)) and
+   logs the run to a **Google Sheet** (the row is written first), then replies
+   in chat with `✅ Nice run, {name}! +{points} points.`. Otherwise it silently
+   ignores the photo.
 4. Automatically posts a **weekly leaderboard** every Monday at 09:00 and a
    **monthly leaderboard** on the 1st of each month at 09:00 (Europe/Nicosia).
+   The weekly job also awards **streak bonuses** just before posting the board.
 
 Google Sheets is the **single source of truth**, so restarts never lose data.
 
@@ -150,8 +151,9 @@ JSON key into an environment variable.
    - Click **Share** → paste the service account email
      (`run-bot@your-project.iam.gserviceaccount.com`) → set role to **Editor**
      → **Send**.
-   > The bot auto-creates a worksheet named **`Log`** with the correct header
-   > row on first run — you don't need to add tabs or headers yourself.
+   > The bot auto-creates the worksheets **`Log`** and **`Plans`** with the
+   > correct header rows on first run — you don't need to add tabs or headers
+   > yourself.
 
 ### 4d. Prepare the JSON for the env var
 
@@ -232,12 +234,14 @@ Run Bot uses **long-polling**, so it runs as a **worker** (no HTTP port).
 ## How the leaderboards work
 
 - Times are in **Europe/Nicosia** (Cyprus). Change with `TIMEZONE` if needed.
-- **Weekly (Mon 09:00):** posts totals for the **previous** Monday–Sunday week.
+- **Weekly (Mon 09:00):** first awards **streak bonuses** for the previous week
+  (so they show up in the board), then posts totals for the **previous**
+  Monday–Sunday week.
 - **Monthly (1st 09:00):** posts totals for the **previous** full calendar month.
-- Rankings sum each user's points over the range, sorted high→low, with 🥇🥈🥉
-  medals for the top three (ranks 4+ have no medal). Users are labelled by full
-  name, else `@username`, else `user <id>`. All participants with points are
-  listed.
+- Rankings sum each user's points over the range (**including** `streak_bonus`
+  points), sorted high→low, with 🥇🥈🥉 medals for the top three (ranks 4+ have
+  no medal). Users are labelled by full name, else `@username`, else
+  `user <id>`. All participants with points are listed.
 - If nobody logged a run in the period, the bot still posts a friendly "no runs
   logged" message so the group knows it's alive.
 
@@ -261,16 +265,60 @@ Alex  - 40 points 🥉
 Sam  - 20 points
 ```
 
-**Points & eligibility:** a photo earns `POINTS_PER_RUN` (default **10**) only
-if Claude confirms it's a **Garmin**, **running**, **completed** activity with a
-**valid date** in the **current week** and confidence ≥ `MIN_CONFIDENCE`
-(default **0.6**). Everything else is silently ignored.
+## Points & plans
+
+Instead of a flat points-per-run, each user has a weekly **plan** — how many
+workouts/week they aim for — and points scale to that plan.
+
+- **Set your plan:** `/setplan N` where `N` is between **2 and 7** (default is
+  **3** if you never set one). Example: `/setplan 4`.
+- **Completing your plan earns ~30 points/week.** Each workout up to your plan
+  is worth `round(30 / plan)` points:
+
+  | Plan | Points per workout (within plan) | Beyond plan (50%) |
+  |------|:--------------------------------:|:-----------------:|
+  | 2 | 15 | 8 |
+  | 3 | 10 | 5 |
+  | 4 | 8 | 4 |
+  | 5 | 6 | 3 |
+  | 6 | 5 | 3 |
+  | 7 | 4 | 2 |
+
+- **Overachievement:** workouts logged **beyond** your plan in the same week
+  still count, at **50%** of the base rate (rounded).
+- **Streak bonus:** every Monday the bot checks the previous week. If you
+  **completed your plan**, your streak increments; otherwise it resets to 0.
+  Consecutive completed weeks award a bonus (added to that week's leaderboard):
+
+  | Consecutive weeks | 1 | 2 | 3 | 4 | 5 | 6 | 7+ |
+  |-------------------|---|---|---|---|---|---|----|
+  | Bonus points | 0 | 0 | +5 | +10 | +15 | +20 | +20 |
+
+  Streak bonuses are logged as `streak_bonus` rows in the sheet and **count
+  toward the leaderboards**. Changing your plan applies **going forward only** —
+  already-logged runs keep their points.
+
+**Eligibility:** a photo is only awarded if Claude confirms it's a **Garmin**,
+**running**, **completed** activity with a **valid date** in the **current
+week** and confidence ≥ `MIN_CONFIDENCE` (default **0.6**). Everything else is
+silently ignored.
 
 ## Diagnostics
 
-Three slash commands help verify the bot's integrations at runtime. They work in
-any chat (DM the bot or run them in the group) and never leak secrets — only a
-concise ✅/⚠️/❌ result is sent to chat.
+Slash commands help configure plans and verify the bot's integrations at
+runtime. They work in any chat (DM the bot or run them in the group) and never
+leak secrets — only a concise result is sent to chat.
+
+**Plan commands:**
+
+- **`/setplan N`** — set your weekly plan to `N` workouts/week (`N` between
+  **2** and **7**). Replies with the per-workout point value; invalid or
+  out-of-range input returns a short usage message. Attributed to whoever sends
+  it, so it works in the group.
+- **`/myplan`** — replies with your current plan and streak (defaults to plan 3,
+  streak 0 if you've never set one).
+
+**Diagnostic commands:**
 
 - **`/status`** — a consolidated health report across all integrations:
   - **Telegram** — ✅ with the bot's `@username` (via `get_me()`).
@@ -285,7 +333,8 @@ concise ✅/⚠️/❌ result is sent to chat.
   authorizes with the service account, opens the spreadsheet by `GOOGLE_SHEET_ID`,
   ensures the `Log` worksheet (auto-creating it — which itself requires Editor
   access — if missing, without appending junk to real data), and reads the
-  header row to confirm read access. On failure it returns a short hint
+  header row to confirm read access. (The `Plans` worksheet is auto-created at
+  startup.) On failure it returns a short hint
   (permission denied → share the sheet with the service-account email; bad JSON
   → check `GOOGLE_SERVICE_ACCOUNT_JSON`; missing/incorrect `GOOGLE_SHEET_ID`).
 - **`/chatid`** — replies with the current chat's ID, type, and title so you can
@@ -307,7 +356,7 @@ concise ✅/⚠️/❌ result is sent to chat.
 | `TARGET_CHAT_ID` | ❌ | — | Group chat id for leaderboards (usually negative). Optional at first — discover it with the `/chatid` command; leaderboards are skipped until it's set. |
 | `TIMEZONE` | ❌ | `Europe/Nicosia` | IANA timezone for scheduling & dates. |
 | `MIN_CONFIDENCE` | ❌ | `0.6` | Min vision confidence to accept a verdict. |
-| `POINTS_PER_RUN` | ❌ | `10` | Points awarded per confirmed run. |
+| `POINTS_PER_RUN` | ❌ | `10` | Legacy setting. Under the plan-based model it no longer sets per-run points — it only marks `running` as awardable. Actual points come from each user's plan (set with `/setplan`). |
 | `LOG_LEVEL` | ❌ | `INFO` | `DEBUG`/`INFO`/`WARNING`/`ERROR`. |
 
 See [`.env.example`](.env.example) for a copy-paste template.
