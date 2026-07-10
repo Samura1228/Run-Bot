@@ -187,6 +187,17 @@ class PhotoHandler:
             part for part in [user.first_name, user.last_name] if part
         ).strip()
 
+        # Opportunistically keep the username directory fresh so coach commands
+        # can resolve @username → id for people who post. Best-effort only: it
+        # upserts ONLY identity columns (never the plan/streak) and MUST NOT
+        # block or fail the workout logging below.
+        try:
+            await self._sheets.touch_user(user.id, username, display_name)
+        except Exception as exc:  # pragma: no cover - best-effort
+            logger.warning(
+                "touch_user failed for poster %s (non-fatal): %s", user.id, exc
+            )
+
         row = WorkoutLogRow(
             timestamp=WorkoutLogRow.now_timestamp(),
             telegram_user_id=user.id,

@@ -165,6 +165,8 @@ Auto-created (with its header row) on first run alongside the `Log` worksheet. O
 
 **Upsert key:** `telegram_user_id`. `/setplan` updates the row if present (preserving `streak`), else appends a new one. The Monday rollover updates `streak` (preserving `plan`/`username`).
 
+**Username directory:** the `Plans` worksheet doubles as an `@username → id` directory. Because Telegram does **not** expose a numeric id from plain `@username` text, the bot learns ids opportunistically: `SheetsService.touch_user(user_id, username, display_name)` upserts **only** the identity columns (creating a row with `DEFAULT_PLAN`/streak 0 if absent, otherwise updating just the username + `updated_at` when it changed — never touching an existing `plan`/`streak`). It is called best-effort for the poster in the photo handler (wrapped so a failure never blocks/undoes workout logging) and from `/setplan`/`/myplan`/`/whoami`. `SheetsService.find_user_id_by_username(username)` scans this sheet case-insensitively (ignoring a leading `@`) and returns the **most recent** matching id, or `None`. This backs coach commands that target `@username` for anyone the bot has already seen.
+
 ---
 
 ## 4. Claude Vision Contract
@@ -472,6 +474,7 @@ Sam  - 20 points
 | `TIMEZONE` | no | IANA timezone; default `Europe/Nicosia`. Used by scheduler & date logic. |
 | `MIN_CONFIDENCE` | no | Float threshold (default `0.6`) below which vision verdicts are ignored. |
 | `POINTS_PER_RUN` | no | Legacy gate value (default `10`). Under the plan-based model this no longer sets the per-workout points — it only ensures `running` is an awardable activity type; actual points come from `workout_points()` (see Section 5). |
+| `COACH_IDS` | no | Comma-separated Telegram user IDs (e.g. `123,456`) allowed to set/view OTHER users' plans. Blank/unset → empty set (no coaches; self-service still works for everyone). Whitespace/blank entries are ignored; non-integer entries are **skipped with a logged warning** (never a boot failure). Exposed via `Settings.coach_ids` and the `Settings.is_coach(user_id)` helper. |
 | `LOG_LEVEL` | no | Logging verbosity (default `INFO`). |
 
 **Validation:** [`bot/config.py`](bot/config.py) fails fast at startup if any required variable is missing or malformed (e.g. `GOOGLE_SERVICE_ACCOUNT_JSON` not valid JSON, `TARGET_CHAT_ID` not an int).
@@ -480,8 +483,11 @@ Sam  - 20 points
 
 | Command | Description |
 |---------|-------------|
-| `/setplan N` | Set the caller's weekly plan to `N` workouts/week (`N` in **2–6**). Upserts the user's `Plans` row (preserving streak) and replies with the per-workout point value (trimmed, e.g. plan 4 → `7.5`). Invalid/out-of-range/missing `N` → a short usage message. Works in groups; attributed to the poster. |
-| `/myplan` | Reply with the caller's current plan + streak (defaults to plan 3 / streak 0 if unset). |
+| `/setplan N` | Set the caller's own weekly plan to `N` workouts/week (`N` in **2–6**, self-service). Upserts the user's `Plans` row (preserving streak) and replies with the per-workout point value (trimmed, e.g. plan 4 → `7.5`). Invalid/out-of-range/missing `N` → a short usage message. Works in groups; attributed to the poster. |
+| `/setplan @user N` | **Coach-only** (caller in `COACH_IDS`). Set another member's plan by `@username` (resolved via the `Plans` username directory or a `text_mention` entity) or by **replying** to their message + `/setplan N`. The plan is parsed from the **last** integer token so both `@user 4` and (reply) `4` work; validated to 2–6. On success replies naming who was set. Non-coaches targeting others get `Only a coach can set or view another member's plan.`; an unresolvable `@username` gets `Couldn't find @user. Ask them to post once (or use /whoami by replying to their message) so I can learn their ID.` |
+| `/myplan` | Reply with the caller's own plan + streak (defaults to plan 3 / streak 0 if unset). |
+| `/myplan @user` | **Coach-only.** View another member's plan + streak by `@username` or by **replying** to their message. Shows defaults (plan 3 / streak 0) with a `(no plan set yet, using default 3)` note if they have no row. Same permission/not-found messages as coach `/setplan`. |
+| `/whoami` | Reply with the caller's Telegram id + name (id in `<code>` monospace for easy copy). Used as a **reply** to another user's message, reports THAT user's id + name instead — the primary way coaches discover member IDs (for `COACH_IDS` and username resolution). |
 | `/status` | Consolidated health report (Telegram, Anthropic, Google Sheets, target chat, timezone). |
 | `/testsheet` | Verify Google Sheets connectivity and Editor access. |
 | `/chatid` | Reply with the current chat's ID for `TARGET_CHAT_ID`. |

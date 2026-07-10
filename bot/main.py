@@ -26,6 +26,7 @@ from bot.handlers.commands import (
     setplan_command,
     status_command,
     testsheet_command,
+    whoami_command,
 )
 from bot.handlers.errors import error_handler
 from bot.handlers.photo import PhotoHandler
@@ -80,6 +81,7 @@ def build_application(settings: Settings) -> Application:
     application.add_handler(CommandHandler("chatid", chatid_command))
     application.add_handler(CommandHandler("testsheet", testsheet_command))
     application.add_handler(CommandHandler("status", status_command))
+    application.add_handler(CommandHandler("whoami", whoami_command))
     application.add_handler(CommandHandler("setplan", setplan_command))
     application.add_handler(CommandHandler("myplan", myplan_command))
 

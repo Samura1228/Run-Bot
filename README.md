@@ -318,6 +318,36 @@ leak secrets — only a concise result is sent to chat.
 - **`/myplan`** — replies with your current plan and streak (defaults to plan 3,
   streak 0 if you've never set one).
 
+**Coach commands (targeting other members):**
+
+Coaches (Telegram user IDs listed in `COACH_IDS`) can set or view **other**
+members' plans. Everyone else can only manage their **own** plan (self-service,
+unchanged). If a non-coach tries to target someone else, the bot replies
+`Only a coach can set or view another member's plan.` and does nothing.
+
+- **`/setplan @username N`** *(coach)* — set another member's plan. The plan is
+  parsed from the last integer, so `/setplan @jane 4` works.
+- **`/setplan N`** as a **reply** to a member's message *(coach)* — sets the
+  replied-to member's plan.
+- **`/myplan @username`** *(coach)* — view another member's plan + streak.
+- **`/myplan`** as a **reply** to a member's message *(coach)* — view the
+  replied-to member's plan + streak. For a member with no plan yet, defaults
+  (plan 3 / streak 0) are shown with a `(no plan set yet, using default 3)` note.
+
+**Finding user IDs & the username directory:**
+
+- **`/whoami`** — replies with your Telegram id and name (id in copy-friendly
+  monospace). Use it as a **reply** to a member's message to get **their** id and
+  name instead — the easiest way for a coach to learn a member's ID.
+- The bot maintains a lightweight **username directory** in the `Plans`
+  worksheet: as people post runs (and via `/setplan`/`/myplan`/`/whoami`), it
+  records their `@username → id`. That lets `/setplan @username N` and
+  `/myplan @username` resolve usernames for anyone the bot has seen. Telegram
+  does **not** expose a numeric id from plain `@username` text, so if a member
+  hasn't been seen yet the bot replies `Couldn't find @username. Ask them to
+  post once (or use /whoami by replying to their message) so I can learn their
+  ID.` Text mentions (which carry a real user object) are resolved directly.
+
 **Diagnostic commands:**
 
 - **`/status`** — a consolidated health report across all integrations:
@@ -339,6 +369,9 @@ leak secrets — only a concise result is sent to chat.
   → check `GOOGLE_SERVICE_ACCOUNT_JSON`; missing/incorrect `GOOGLE_SHEET_ID`).
 - **`/chatid`** — replies with the current chat's ID, type, and title so you can
   discover the value for `TARGET_CHAT_ID`.
+- **`/whoami`** — replies with your (or, when used as a reply, the replied-to
+  user's) Telegram id and name, so coaches can discover member IDs for
+  `COACH_IDS` and for username resolution.
 
 ---
 ---
@@ -357,6 +390,7 @@ leak secrets — only a concise result is sent to chat.
 | `TIMEZONE` | ❌ | `Europe/Nicosia` | IANA timezone for scheduling & dates. |
 | `MIN_CONFIDENCE` | ❌ | `0.6` | Min vision confidence to accept a verdict. |
 | `POINTS_PER_RUN` | ❌ | `10` | Legacy setting. Under the plan-based model it no longer sets per-run points — it only marks `running` as awardable. Actual points come from each user's plan (set with `/setplan`). |
+| `COACH_IDS` | ❌ | *(empty)* | Comma-separated Telegram user IDs (e.g. `123,456`) allowed to set/view OTHER users' plans. Blank/unset → no coaches. Non-integer entries are skipped with a warning. Use `/whoami` (reply to a member) to find IDs. |
 | `LOG_LEVEL` | ❌ | `INFO` | `DEBUG`/`INFO`/`WARNING`/`ERROR`. |
 
 See [`.env.example`](.env.example) for a copy-paste template.

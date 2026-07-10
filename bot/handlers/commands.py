@@ -21,14 +21,15 @@ from html import escape
 from typing import Optional
 
 import anthropic
-from telegram import Update
-from telegram.constants import ParseMode
+from telegram import Update, User
+from telegram.constants import MessageEntityType, ParseMode
 from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
 from bot.config import Settings
 from bot.services.sheets import SheetsService, check_sheets
 from bot.utils.points import (
+    DEFAULT_PLAN,
     MAX_PLAN,
     MIN_PLAN,
     STANDARD_POINTS_PER_WEEK,
@@ -39,9 +40,10 @@ from bot.utils.points import (
 logger = logging.getLogger(__name__)
 
 _SETPLAN_USAGE = (
-    f"Usage: /setplan N  (N between {MIN_PLAN} and {MAX_PLAN} "
-    "workouts per week)"
+    f"Usage: /setplan [N]  or  /setplan @user N  (N {MIN_PLAN}–{MAX_PLAN}). "
+    "Coaches can target a user by @username or by replying to them."
 )
+_COACH_ONLY_MSG = "Only a coach can set or view another member's plan."
 
 
 async def chatid_command(
@@ -106,99 +108,334 @@ def _get_sheets(context: ContextTypes.DEFAULT_TYPE) -> Optional[SheetsService]:
     return None
 
 
-async def setplan_command(
+def _display_name_for(user: User) -> str:
+    """Return a user's display name: full name, else @username, else id."""
+
+    full = " ".join(
+        part for part in [user.first_name, user.last_name] if part
+    ).strip()
+    if full:
+        return full
+    if user.username:
+        return f"@{user.username}"
+    return f"user {user.id}"
+
+
+def _who_label(user_id: int, username: str, display_name: str) -> str:
+    """Return a friendly label for a resolved target (name > @username > id)."""
+
+    name = (display_name or "").strip()
+    if name:
+        return name
+    uname = (username or "").strip()
+    if uname:
+        return f"@{uname}"
+    return f"user {user_id}"
+
+
+def _text_mention_user(message) -> Optional[User]:
+    """Return the User from a ``text_mention`` entity, if any.
+
+    A ``text_mention`` entity DOES carry a full :class:`telegram.User` object
+    (including the numeric id), so it lets us target users who have no public
+    ``@username``. Returns the first such user found, else ``None``.
+    """
+
+    for entity in message.entities or []:
+        if entity.type == MessageEntityType.TEXT_MENTION and entity.user:
+            return entity.user
+    return None
+
+
+def _first_username_arg(args: list[str]) -> Optional[str]:
+    """Return the first ``@username`` token (without the ``@``), if present."""
+
+    for token in args:
+        stripped = token.strip()
+        if stripped.startswith("@") and len(stripped) > 1:
+            return stripped[1:]
+    return None
+
+
+def _last_int_arg(args: list[str]) -> Optional[int]:
+    """Return the LAST integer token among args, or ``None`` if there is none.
+
+    Parsing the last integer lets both ``/setplan @user 4`` and (reply)
+    ``/setplan 4`` work, ignoring a leading ``@username`` token.
+    """
+
+    result: Optional[int] = None
+    for token in args:
+        try:
+            result = int(token.strip())
+        except ValueError:
+            continue
+    return result
+
+
+class _TargetError(Exception):
+    """Raised when a coach command target can't be resolved; carries a reply."""
+
+    def __init__(self, reply: str) -> None:
+        super().__init__(reply)
+        self.reply = reply
+
+
+async def _resolve_target(
+    message,
+    caller: User,
+    args: list[str],
+    sheets: SheetsService,
+    settings: Settings,
+) -> tuple[int, str, str]:
+    """Resolve the (user_id, username, display_name) a plan command targets.
+
+    Priority:
+      1. Reply to another user's message → that replied-to user.
+      2. First ``@username`` arg (or a ``text_mention`` entity) → resolved id.
+      3. Otherwise → the caller themselves (self-service).
+
+    Raises :class:`_TargetError` (with a user-facing ``reply``) when a
+    ``@username`` can't be resolved, or when a non-coach tries to target
+    someone other than themselves.
+    """
+
+    caller_username = (caller.username or "").strip()
+    caller_display = _display_name_for(caller)
+
+    # 1) Reply targeting — reliable id + username from the replied-to message.
+    reply = message.reply_to_message
+    if reply is not None and reply.from_user is not None:
+        target_user = reply.from_user
+        _ensure_coach(caller, target_user.id, settings)
+        return (
+            target_user.id,
+            (target_user.username or "").strip(),
+            _display_name_for(target_user),
+        )
+
+    # 2) text_mention entity (carries a full User with id) → prefer it.
+    mention_user = _text_mention_user(message)
+    if mention_user is not None:
+        _ensure_coach(caller, mention_user.id, settings)
+        return (
+            mention_user.id,
+            (mention_user.username or "").strip(),
+            _display_name_for(mention_user),
+        )
+
+    # 2b) @username text → resolve via the Plans directory.
+    username_arg = _first_username_arg(args)
+    if username_arg is not None:
+        target_id = await sheets.find_user_id_by_username(username_arg)
+        if target_id is None:
+            raise _TargetError(
+                f"Couldn't find @{username_arg}. Ask them to post once (or use "
+                "/whoami by replying to their message) so I can learn their ID."
+            )
+        _ensure_coach(caller, target_id, settings)
+        return target_id, username_arg, f"@{username_arg}"
+
+    # 3) Self-service.
+    return caller.id, caller_username, caller_display
+
+
+def _ensure_coach(caller: User, target_id: int, settings: Settings) -> None:
+    """Raise :class:`_TargetError` if a non-coach targets another user."""
+
+    if target_id != caller.id and not settings.is_coach(caller.id):
+        raise _TargetError(_COACH_ONLY_MSG)
+
+
+async def whoami_command(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    """Set the caller's weekly plan (workouts/week) via ``/setplan N``.
+    """Report a user's Telegram id + name so coaches can discover IDs.
 
-    Registered with ``CommandHandler("setplan", setplan_command)``; PTB also
-    matches the ``/setplan@BotUsername N`` form. The integer argument must be
-    within ``[MIN_PLAN, MAX_PLAN]`` (2–6); otherwise a short usage/error message
-    is sent. On success the user's Plans row is upserted (preserving streak) and
-    a confirmation with the per-workout point value is returned. Attributed to
-    ``message.from_user`` so it works in group chats.
+    If used as a REPLY to someone's message, reports THAT replied-to user's id
+    and name (so a coach can learn a member's id by replying to them). Otherwise
+    reports the CALLER's own id and name. The id is wrapped in Telegram HTML
+    ``<code>`` (like ``/chatid``) for easy copying. Best-effort touches the
+    Plans username directory for the reported user.
     """
 
     message = update.effective_message
     if message is None:
         return
-    user = message.from_user
-    if user is None:
+    caller = message.from_user
+    if caller is None:
         return
 
-    # Parse the integer argument. context.args holds tokens after the command.
-    args = context.args or []
-    if len(args) != 1:
-        await _safe_reply(message, _SETPLAN_USAGE)
-        return
+    reply = message.reply_to_message
+    if reply is not None and reply.from_user is not None:
+        target = reply.from_user
+    else:
+        target = caller
+
+    name = _display_name_for(target)
+    username = target.username or "—"
+    lines = [
+        f"👤 {escape(name)}",
+        f"ID: <code>{target.id}</code>",
+        f"Username: @{escape(username)}" if target.username else "Username: —",
+    ]
+
+    # Best-effort: keep the username directory fresh for this user.
+    sheets = _get_sheets(context)
+    if sheets is not None and target.username:
+        try:
+            await sheets.touch_user(
+                target.id, target.username.strip(), _display_name_for(target)
+            )
+        except Exception as exc:  # pragma: no cover - best-effort
+            logger.warning(
+                "touch_user failed during /whoami for %s: %s", target.id, exc
+            )
+
     try:
-        requested = int(args[0])
-    except ValueError:
-        await _safe_reply(message, _SETPLAN_USAGE)
+        await message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+    except TelegramError as exc:
+        logger.error("Failed to send /whoami reply: %s", exc)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.error("Unexpected error handling /whoami: %s", exc)
+
+
+async def setplan_command(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Set a weekly plan (workouts/week) via ``/setplan``.
+
+    Forms:
+      - ``/setplan N`` → set the caller's own plan (self-service).
+      - ``/setplan @username N`` (coach) → set that user's plan.
+      - reply to a user's message + ``/setplan N`` (coach) → set their plan.
+
+    The plan is parsed from the LAST integer token (so ``@user 4`` and (reply)
+    ``4`` both work) and validated to ``[MIN_PLAN, MAX_PLAN]`` (2–6). Targeting
+    another user requires the caller to be a coach; self-service is unchanged.
+    On success the target's Plans row is upserted (preserving streak).
+    """
+
+    message = update.effective_message
+    if message is None:
         return
-    if not (MIN_PLAN <= requested <= MAX_PLAN):
-        await _safe_reply(message, _SETPLAN_USAGE)
+    caller = message.from_user
+    if caller is None:
         return
 
     sheets = _get_sheets(context)
     if sheets is None:
         await _safe_reply(message, "❌ Could not set plan — internal error, see logs.")
         return
+    settings = _get_settings(context)
+    if settings is None:
+        await _safe_reply(message, "❌ Could not set plan — internal error, see logs.")
+        return
+
+    args = context.args or []
+
+    # Parse the plan from the LAST integer token; validate 2–6.
+    requested = _last_int_arg(args)
+    if requested is None or not (MIN_PLAN <= requested <= MAX_PLAN):
+        await _safe_reply(message, _SETPLAN_USAGE)
+        return
+
+    # Resolve who is being set (self by default; coach targeting via reply /
+    # @username / text_mention).
+    try:
+        target_id, target_username, target_display = await _resolve_target(
+            message, caller, args, sheets, settings
+        )
+    except _TargetError as exc:
+        await _safe_reply(message, exc.reply)
+        return
 
     plan = clamp_plan(requested)
-    username = (user.username or "").strip()
     try:
-        await sheets.set_plan(user.id, username, plan)
+        await sheets.set_plan(target_id, target_username, plan)
     except Exception as exc:
-        logger.error("Failed to set plan for user %s: %s", user.id, exc)
+        logger.error("Failed to set plan for user %s: %s", target_id, exc)
         await _safe_reply(message, "❌ Could not set plan — please try again later.")
         return
 
     per_workout = format_points(STANDARD_POINTS_PER_WEEK / plan)
-    await _safe_reply(
-        message,
-        f"✅ Plan set: {plan} workouts/week. Points per workout: "
-        f"{per_workout} (complete your plan for ~{STANDARD_POINTS_PER_WEEK} "
-        "pts/week).",
-    )
+    who = _who_label(target_id, target_username, target_display)
+    if target_id == caller.id:
+        await _safe_reply(
+            message,
+            f"✅ Plan set: {plan} workouts/week. Points per workout: "
+            f"{per_workout} (complete your plan for ~{STANDARD_POINTS_PER_WEEK} "
+            "pts/week).",
+        )
+    else:
+        await _safe_reply(
+            message,
+            f"✅ Plan set for {who}: {plan} workouts/week. "
+            f"Points per workout: {per_workout}.",
+        )
 
 
 async def myplan_command(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    """Reply with the caller's current plan and streak via ``/myplan``.
+    """Reply with a plan and streak via ``/myplan``.
 
-    Defaults to the default plan (3) with a 0-week streak if the user has no
-    Plans row yet. Attributed to ``message.from_user`` so it works in groups.
+    Forms:
+      - ``/myplan`` → the caller's own plan + streak (self-service).
+      - ``/myplan @username`` (coach) → that user's plan + streak.
+      - reply to a user's message + ``/myplan`` (coach) → their plan + streak.
+
+    Defaults to plan :data:`DEFAULT_PLAN` (3) / streak 0 if the target has no
+    Plans row. Viewing another user requires the caller to be a coach.
     """
 
     message = update.effective_message
     if message is None:
         return
-    user = message.from_user
-    if user is None:
+    caller = message.from_user
+    if caller is None:
         return
 
     sheets = _get_sheets(context)
     if sheets is None:
         await _safe_reply(message, "❌ Could not read plan — internal error, see logs.")
         return
+    settings = _get_settings(context)
+    if settings is None:
+        await _safe_reply(message, "❌ Could not read plan — internal error, see logs.")
+        return
+
+    args = context.args or []
+    try:
+        target_id, target_username, target_display = await _resolve_target(
+            message, caller, args, sheets, settings
+        )
+    except _TargetError as exc:
+        await _safe_reply(message, exc.reply)
+        return
 
     try:
-        record = await sheets.get_plan_record(user.id)
+        record = await sheets.get_plan_record(target_id)
     except Exception as exc:
-        logger.error("Failed to read plan for user %s: %s", user.id, exc)
+        logger.error("Failed to read plan for user %s: %s", target_id, exc)
         await _safe_reply(message, "❌ Could not read plan — please try again later.")
         return
 
-    from bot.utils.points import DEFAULT_PLAN
-
     plan = record["plan"] if record is not None else DEFAULT_PLAN
     streak = record["streak"] if record is not None else 0
-    await _safe_reply(
-        message,
-        f"Your plan: {plan} workouts/week · streak: {streak} weeks.",
-    )
+
+    if target_id == caller.id:
+        await _safe_reply(
+            message,
+            f"Your plan: {plan} workouts/week · streak: {streak} weeks.",
+        )
+    else:
+        who = _who_label(target_id, target_username, target_display)
+        note = "" if record is not None else " (no plan set yet, using default 3)"
+        await _safe_reply(
+            message,
+            f"{who} — plan: {plan} workouts/week · streak: {streak} weeks.{note}",
+        )
 
 
 async def _safe_reply(message, text: str) -> None:

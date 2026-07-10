@@ -423,6 +423,121 @@ class SheetsService:
             )
         return parsed
 
+    async def find_user_id_by_username(self, username: str) -> Optional[int]:
+        """Return the most recent user id matching ``username`` in ``Plans``.
+
+        The lookup is case-insensitive and ignores a single leading ``@`` on the
+        query. The ``Plans`` worksheet doubles as a username directory: rows are
+        scanned newest-last (later rows override earlier ones, so the most recent
+        matching id wins). Returns ``None`` if no match is found or the query is
+        blank. All blocking gspread I/O runs in :func:`asyncio.to_thread`.
+        """
+
+        query = (username or "").strip().lstrip("@").lower()
+        if query == "":
+            return None
+
+        rows = await asyncio.to_thread(self._read_all_plans_sync)
+        found: Optional[int] = None
+        for row in rows[1:]:  # skip header
+            if len(row) <= _PLAN_COL_USERNAME:
+                continue
+            row_username = row[_PLAN_COL_USERNAME].strip().lstrip("@").lower()
+            if row_username == "" or row_username != query:
+                continue
+            raw_id = row[_PLAN_COL_USER_ID].strip()
+            if not raw_id:
+                continue
+            try:
+                found = int(raw_id)
+            except ValueError:
+                continue
+            # Do not break: keep scanning so the LAST (most recent) match wins.
+        return found
+
+    def _touch_user_sync(self, user_id: int, username: str) -> None:
+        """Blocking upsert of ONLY the identity columns for a user.
+
+        Creates a row with ``DEFAULT_PLAN`` / streak 0 if none exists; otherwise
+        updates only the username (and ``updated_at``), preserving the existing
+        plan and streak. Used to keep the username directory fresh.
+        """
+
+        worksheet = self._require_plans_worksheet()
+        rows = worksheet.get_all_values()
+        user_id_str = str(user_id)
+        index: Optional[int] = None
+        existing_plan = DEFAULT_PLAN
+        existing_streak = 0
+        existing_username = ""
+        for offset, row in enumerate(rows[1:], start=2):  # header is row 1
+            if len(row) <= _PLAN_COL_USER_ID:
+                continue
+            if row[_PLAN_COL_USER_ID] == user_id_str:
+                index = offset
+                existing_plan = self._parse_plan_cell(
+                    row[_PLAN_COL_PLAN] if len(row) > _PLAN_COL_PLAN else ""
+                )
+                existing_streak = self._parse_streak_cell(
+                    row[_PLAN_COL_STREAK] if len(row) > _PLAN_COL_STREAK else ""
+                )
+                existing_username = (
+                    row[_PLAN_COL_USERNAME]
+                    if len(row) > _PLAN_COL_USERNAME
+                    else ""
+                )
+                break
+
+        if index is None:
+            # No row yet: create one with defaults so the directory learns the id.
+            row_values = [
+                user_id_str,
+                username,
+                str(DEFAULT_PLAN),
+                str(0),
+                self._now_iso(),
+            ]
+            worksheet.append_row(row_values, value_input_option="RAW")
+            return
+
+        # Row exists: only touch identity columns if the username actually
+        # changed, preserving plan/streak. Avoids a needless write when nothing
+        # changed (keeps the photo path cheap).
+        if username == existing_username:
+            return
+        row_values = [
+            user_id_str,
+            username,
+            str(existing_plan),
+            str(existing_streak),
+            self._now_iso(),
+        ]
+        worksheet.update(
+            values=[row_values],
+            range_name=f"A{index}:E{index}",
+            value_input_option="RAW",
+        )
+
+    async def touch_user(
+        self, user_id: int, username: str, display_name: str = ""
+    ) -> None:
+        """Upsert ONLY a user's identity (username), keeping the directory fresh.
+
+        Creates a ``Plans`` row with :data:`DEFAULT_PLAN` / streak 0 if the user
+        has none, WITHOUT changing an existing plan/streak. Only writes when the
+        username changed or the row is absent, so it stays cheap on the photo
+        path. ``display_name`` is accepted for API symmetry but not stored (the
+        ``Plans`` sheet has no display-name column). Blocking gspread calls run
+        in :func:`asyncio.to_thread` with the shared transient-retry policy.
+        """
+
+        await self._retry_blocking(
+            self._touch_user_sync,
+            user_id,
+            (username or "").strip(),
+            label=f"touch_user user={user_id}",
+        )
+
     @staticmethod
     def _now_iso() -> str:
         """Return the current UTC time as an ISO 8601 string (e.g. ``...Z``)."""

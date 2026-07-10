@@ -8,11 +8,14 @@ missing or malformed.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from functools import lru_cache
 from typing import Any, Optional
 
 from pydantic import BaseModel, Field, ValidationError, field_validator
+
+logger = logging.getLogger(__name__)
 
 
 class Settings(BaseModel):
@@ -33,6 +36,15 @@ class Settings(BaseModel):
     min_confidence: float = Field(default=0.6, ge=0.0, le=1.0)
     points_per_run: int = Field(default=10, ge=0)
     log_level: str = Field(default="INFO")
+    # Telegram user IDs allowed to set/view OTHER users' plans (coaches).
+    # Sourced from the optional ``COACH_IDS`` env var (comma-separated). Empty
+    # set means no coaches configured (self-service still works for everyone).
+    coach_ids: set[int] = Field(default_factory=set)
+
+    def is_coach(self, user_id: int) -> bool:
+        """Return True if the given Telegram user id is a configured coach."""
+
+        return user_id in self.coach_ids
 
     @field_validator("log_level")
     @classmethod
@@ -59,6 +71,32 @@ def _require(name: str) -> str:
     if value is None or value.strip() == "":
         raise ConfigError(f"Missing required environment variable: {name}")
     return value
+
+
+def _parse_coach_ids(raw: Optional[str]) -> set[int]:
+    """Parse the ``COACH_IDS`` env var into a set of integer user IDs.
+
+    The value is a comma-separated list of Telegram user IDs (e.g. ``123,456``).
+    Whitespace and blank entries are ignored. Non-integer entries are skipped
+    with a logged warning (rather than raising) so a typo never blocks boot.
+    A blank/unset value yields an empty set.
+    """
+
+    if raw is None or raw.strip() == "":
+        return set()
+
+    coach_ids: set[int] = set()
+    for token in raw.split(","):
+        entry = token.strip()
+        if entry == "":
+            continue
+        try:
+            coach_ids.add(int(entry))
+        except ValueError:
+            logger.warning(
+                "Ignoring invalid COACH_IDS entry %r (not an integer).", entry
+            )
+    return coach_ids
 
 
 def _parse_service_account_json(raw: str) -> dict[str, Any]:
@@ -99,12 +137,17 @@ def load_settings() -> Settings:
 
     service_account_info = _parse_service_account_json(service_account_raw)
 
+    # COACH_IDS is optional: blank/unset → no coaches. Non-integer entries are
+    # skipped with a warning (never a boot failure).
+    coach_ids = _parse_coach_ids(os.environ.get("COACH_IDS"))
+
     kwargs: dict[str, Any] = {
         "telegram_bot_token": telegram_bot_token,
         "anthropic_api_key": anthropic_api_key,
         "google_service_account_info": service_account_info,
         "google_sheet_id": google_sheet_id,
         "target_chat_id": target_chat_id,
+        "coach_ids": coach_ids,
     }
 
     # Optional overrides.
