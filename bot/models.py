@@ -14,7 +14,9 @@ from typing import Literal, Optional
 from pydantic import BaseModel, Field, field_validator
 
 # Activity types Claude is allowed to return.
-ActivityType = Literal["running", "cycling", "walking", "swimming", "other", "unknown"]
+ActivityType = Literal[
+    "running", "cycling", "walking", "strength", "swimming", "other", "unknown"
+]
 
 _ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 def _format_points_cell(p: float) -> str:
@@ -44,6 +46,10 @@ class VisionVerdict(BaseModel):
     workout_date: Optional[str] = None
     distance: Optional[str] = None
     duration: Optional[str] = None
+    # Total elapsed/moving time in whole minutes (rounded), or None if the
+    # duration couldn't be read. Used to enforce per-activity minimum-duration
+    # thresholds for the bonus activities (walking/cycling/strength).
+    duration_minutes: Optional[int] = None
     confidence: float = Field(..., ge=0.0, le=1.0)
 
     @field_validator("workout_date")
@@ -61,15 +67,17 @@ class VisionVerdict(BaseModel):
         return value
 
     def is_eligible(self, min_confidence: float) -> bool:
-        """Return True if this verdict is eligible for a points award.
+        """Return True if this verdict passes the shared gating pipeline.
 
-        Eligibility (per the blueprint) requires a completed Garmin running
-        activity with a valid date and sufficient confidence.
+        Shared gating (per the blueprint) requires a completed Garmin activity
+        with a valid date and sufficient confidence. The activity_type is NOT
+        restricted here — the handler branches on activity_type after this gate
+        (running uses the plan-based model; walking/cycling/strength are flat
+        bonus activities with their own minimum-duration thresholds).
         """
 
         return (
             self.is_garmin
-            and self.activity_type == "running"
             and self.is_completed
             and self.workout_date is not None
             and self.confidence >= min_confidence

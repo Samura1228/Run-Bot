@@ -5,12 +5,21 @@ whenever someone posts a **photo**, it:
 
 1. Downloads the image and hashes it (to prevent duplicate submissions).
 2. Sends it to **Claude vision** to check whether it's a **completed Garmin
-   Connect running screenshot** and extract the workout date.
-3. If it's a valid run **dated within the current Mon–Sun week** (Cyprus time),
-   it awards **plan-based points** (see [Points & plans](#points--plans)) and
-   logs the run to a **Google Sheet** (the row is written first), then replies
-   in chat with `✅ Nice run, {name}! +{points} points.`. Otherwise it silently
-   ignores the photo.
+   Connect screenshot**, classify the **activity** (running / walking / cycling /
+   strength) and extract the workout date + duration.
+3. If it's a valid activity **dated within the current Mon–Sun week** (Cyprus
+   time), it awards points and logs to a **Google Sheet** (the row is written
+   first), then replies in chat:
+   - **Running** → **plan-based points** (see [Points & plans](#points--plans)):
+     `✅ Nice run, {name}! +{points} points.`
+   - **Walking / cycling / strength** → a flat **5 points** once a minimum
+     duration is met (walking ≥ 40 min, cycling ≥ 60 min, strength/stretch ≥ 15
+     min): `✅ Nice {walk|ride|strength session}, {name}! +5 points.`. Below the
+     minimum it replies with a short warning and awards nothing. These are
+     **separate bonus points** — they don't affect the running plan or streak.
+
+   Otherwise (old week, duplicate, non-Garmin, not completed, unrecognized) it
+   silently ignores the photo.
 4. Automatically posts a **weekly leaderboard** every Monday at 09:00 and a
    **monthly leaderboard** on the 1st of each month at 09:00 (Europe/Nicosia).
    The weekly job also awards **streak bonuses** just before posting the board.
@@ -238,8 +247,9 @@ Run Bot uses **long-polling**, so it runs as a **worker** (no HTTP port).
   (so they show up in the board), then posts totals for the **previous**
   Monday–Sunday week.
 - **Monthly (1st 09:00):** posts totals for the **previous** full calendar month.
-- Rankings sum each user's points over the range (**including** `streak_bonus`
-  points), sorted high→low, with 🥇🥈🥉 medals for the top three (ranks 4+ have
+- Rankings sum each user's points over the range (**including** the
+  walking/cycling/strength bonus points and `streak_bonus` points), sorted
+  high→low, with 🥇🥈🥉 medals for the top three (ranks 4+ have
   no medal). Users are labelled by full name, else `@username`, else
   `user <id>`. All participants with points are listed.
 - If nobody logged a run in the period, the bot still posts a friendly "no runs
@@ -298,10 +308,32 @@ workouts/week they aim for — and points scale to that plan.
   toward the leaderboards**. Changing your plan applies **going forward only** —
   already-logged runs keep their points.
 
+### Other activities — walking, cycling & strength
+
+Besides running, three **bonus** activities each earn a flat **5 points** once a
+minimum duration is met. They count in the weekly/monthly leaderboards but are
+**separate** from the running plan — they do **not** affect your plan progress,
+streak, or overachievement (those stay running-only).
+
+| Activity | Minimum duration | Points | Success reply | Below-minimum reply |
+|----------|:----------------:|:------:|---------------|---------------------|
+| Walking | **40 min** | 5 | `✅ Nice walk, {name}! +5 points.` | `⚠️ Walk is {dur} min — minimum is 40 min to earn points.` |
+| Cycling | **60 min** | 5 | `✅ Nice ride, {name}! +5 points.` | `⚠️ Ride is {dur} min — minimum is 60 min to earn points.` |
+| Strength/stretch | **15 min** | 5 | `✅ Nice strength session, {name}! +5 points.` | `⚠️ Strength/stretch is {dur} min — minimum is 15 min to earn points.` |
+
+- "Strength" covers **strength training and stretching/yoga/mobility**.
+- Below the minimum duration → **no points, not logged**; the bot just replies
+  with the short warning above. If Claude can't read a duration for a bonus
+  activity, it replies `⚠️ Couldn't read the duration — no points awarded.`
+- Same rules as running otherwise: it must be a **Garmin**, **completed**
+  activity dated in the **current week**, above the confidence threshold, and
+  not a duplicate — otherwise it's silently ignored.
+
 **Eligibility:** a photo is only awarded if Claude confirms it's a **Garmin**,
-**running**, **completed** activity with a **valid date** in the **current
-week** and confidence ≥ `MIN_CONFIDENCE` (default **0.6**). Everything else is
-silently ignored.
+**completed** activity of a supported type (**running**, **walking**,
+**cycling**, or **strength**) with a **valid date** in the **current week** and
+confidence ≥ `MIN_CONFIDENCE` (default **0.6**). Bonus activities additionally
+require their minimum duration. Everything else is silently ignored.
 
 ## Diagnostics
 

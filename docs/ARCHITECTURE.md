@@ -1,7 +1,9 @@
 # Run Bot — Architecture & Blueprint
 
 > **Status:** Design blueprint (implementation-ready). No application code is included here.
-> **Purpose:** A Python Telegram bot that passively monitors a running group, validates Garmin Connect running screenshots via Claude vision, awards points, logs to Google Sheets, and posts weekly/monthly leaderboards.
+> **Purpose:** A Python Telegram bot that passively monitors a running group, validates Garmin Connect activity screenshots via Claude vision, awards points (plan-based for running; flat bonus points for walking/cycling/strength), logs to Google Sheets, and posts weekly/monthly leaderboards.
+>
+> **Supported activities:** `running` (plan-based fractional points — the core loop), plus three **bonus** activities that award a flat **5 points** each once a minimum duration is met: **walking** (≥ **40 min**), **cycling** (≥ **60 min**), and **strength** (strength training / stretching / yoga / mobility, ≥ **15 min**). Bonus activities go through the **same** gating pipeline as running (Garmin, completed, current-week, dedup) but are **separate**: they do **not** count toward the running plan, streak, or overachievement. They **do** count in the weekly/monthly leaderboards.
 
 ---
 
@@ -12,7 +14,7 @@
 1. Joins a Telegram group and passively listens to all messages.
 2. On any **photo** message, downloads the image, hashes the raw bytes (dedup), and sends it to **Claude vision**.
 3. Claude returns a **strict JSON verdict** (is it a Garmin running screenshot, completed, with a workout date, etc.).
-4. The bot applies **plan-based points/date-window logic**: if the workout date falls in the **current Mon–Sun week** (Europe/Nicosia) → award points based on the user's **weekly plan** (see Section 5), log the run to Google Sheets (row written first, then an INFO log line), and reply in chat with `✅ Nice run, {name}! +{points} points.`. Otherwise → silently ignore.
+4. The bot applies **points/date-window logic**: if the workout date falls in the **current Mon–Sun week** (Europe/Nicosia) → award points and log to Google Sheets (row written first, then an INFO log line), then reply in chat. **Running** uses the user's **weekly plan** (see Section 5) and replies `✅ Nice run, {name}! +{points} points.`. **Walking/cycling/strength** award a flat **5 points** once their minimum duration is met and reply `✅ Nice {walk|ride|strength session}, {name}! +5 points.`; below their minimum duration the bot replies with a short warning and awards nothing. Anything else (old-week, duplicate, non-Garmin, not completed, `other`) → silently ignored.
 5. An **APScheduler** (AsyncIOScheduler, timezone `Europe/Nicosia`) runs on the same event loop and posts a **weekly leaderboard** (Monday 09:00) and a **monthly leaderboard** (1st of month 09:00). The weekly job also performs a **streak rollover** (awarding streak bonuses) just before posting the board.
 6. **Google Sheets is the single source of truth.** Leaderboards are computed by reading and aggregating the sheet, so restarts lose no data.
 
@@ -125,8 +127,8 @@ Row 1 is a fixed header row. All subsequent rows are one confirmed & awarded wor
 | C | `telegram_username` | string | `@username` without `@`, or empty if none. |
 | D | `display_name` | string | Full name: `first_name` + `last_name` (trimmed). |
 | E | `workout_date` | string (ISO date) | `YYYY-MM-DD` extracted by Claude (the activity date). |
-| F | `activity_type` | string | Lowercase enum: `running` for workouts, or `streak_bonus` for weekly streak-bonus rows. |
-| G | `points` | number | Points awarded (plan-based per-workout value — an exact fraction like `7.5`, or the streak bonus for `streak_bonus` rows). Written with a dot decimal (never a locale comma) and trimmed of trailing zeros (`15`, `7.5`, `3.75`). |
+| F | `activity_type` | string | Lowercase enum: `running` (plan-based workout), `walking`/`cycling`/`strength` (flat 5-point bonus activities), or `streak_bonus` for weekly streak-bonus rows. |
+| G | `points` | number | Points awarded: for `running`, the plan-based per-workout value (an exact fraction like `7.5`); for `walking`/`cycling`/`strength`, a flat `5`; for `streak_bonus`, the streak bonus. Written with a dot decimal (never a locale comma) and trimmed of trailing zeros (`15`, `7.5`, `5`). |
 | H | `image_hash` | string | SHA-256 hex of downloaded image bytes (dedup key). |
 | I | `telegram_file_id` | string | Telegram `file_id` of the largest photo size. |
 | J | `chat_id` | integer (stored as string) | `message.chat.id`. |
@@ -177,29 +179,43 @@ Auto-created (with its header row) on first run alongside the `Log` worksheet. O
 - Send **one user message** containing:
   1. An `image` content block (base64 of the downloaded bytes, correct `media_type`).
   2. A `text` content block with the instruction to analyze and return **only** JSON.
-- Use a **system prompt** that pins the role, the strict JSON schema, and the "return JSON only, no prose" rule.
+- Use a **system prompt** that pins the role, the strict JSON schema, and the "return JSON only, no prose" rule. The prompt classifies `activity_type` into `running`/`walking`/`cycling`/`strength`/`other` (Garmin title/icon cues: Бег/Run→running, Ходьба/Walk→walking, Велоспорт/Cycling/Ride→cycling, Силовая/Strength/Стретчинг/Stretching/Йога/Yoga→strength) and extracts `duration_minutes` (whole minutes) so the bot can enforce per-activity duration thresholds numerically.
 - Set a low `temperature` (e.g. `0`) and a modest `max_tokens`.
 
 ### System Prompt (verbatim intent)
 
 ```
-You are an image verification assistant for a running club.
+You are an image verification assistant for a fitness club.
 You will be shown a single screenshot. Determine whether it is a Garmin Connect
-activity screenshot for a COMPLETED (not planned/scheduled) RUNNING activity,
-and extract structured details.
+activity screenshot for a COMPLETED (not planned/scheduled) activity, classify
+the activity type, and extract structured details.
 
 Respond with a SINGLE valid JSON object and NOTHING else — no markdown, no code
 fences, no commentary. Use exactly this schema and these keys:
 
 {
   "is_garmin": boolean,        // true only if this is clearly a Garmin Connect screenshot
-  "activity_type": string,     // one of: "running", "cycling", "walking", "swimming", "other", "unknown"
+  "activity_type": string,     // one of: "running", "walking", "cycling", "strength", "other"
   "is_completed": boolean,     // true if the activity is completed with real recorded data (not a planned/scheduled workout)
   "workout_date": string|null, // the activity date in ISO "YYYY-MM-DD" if visible, else null
   "distance": string|null,     // as shown, e.g. "5.02 km", else null
   "duration": string|null,     // as shown, e.g. "00:28:14", else null
+  "duration_minutes": number|null, // total elapsed/moving time in WHOLE MINUTES (rounded), else null
   "confidence": number         // 0.0–1.0, your overall confidence in this verdict
 }
+
+Activity classification cues (Garmin title/icon):
+- Бег / Run / Running / Treadmill → "running"
+- Ходьба / Walk / Walking → "walking"
+- Велоспорт / Cycling / Bike / Ride → "cycling"
+- Силовая / Strength / Стретчинг / Stretching / Йога / Yoga / Mobility → "strength"
+  (covers strength training AND stretching/yoga/mobility)
+- Anything else (e.g. swimming) → "other"
+
+Duration:
+- "duration_minutes" = the elapsed/moving time as a whole number of minutes,
+  rounded to nearest. "1:08:51" → 69; "00:28:14" → 28; "45 мин" → 45. If only a
+  distance is shown and no time, set duration_minutes=null.
 
 Rules:
 - If it is not a Garmin screenshot, set is_garmin=false and confidence accordingly.
@@ -218,11 +234,12 @@ Analyze the attached screenshot and return the JSON verdict per the schema.
 | Field | Type | Required | Constraints |
 |-------|------|----------|-------------|
 | `is_garmin` | boolean | yes | — |
-| `activity_type` | string | yes | enum: `running`, `cycling`, `walking`, `swimming`, `other`, `unknown` |
+| `activity_type` | string | yes | enum: `running`, `walking`, `cycling`, `strength`, `other` (the model also tolerates legacy `swimming`/`unknown`, treated as non-awardable) |
 | `is_completed` | boolean | yes | — |
 | `workout_date` | string \| null | yes | ISO `YYYY-MM-DD` when non-null |
 | `distance` | string \| null | yes | free text or null |
 | `duration` | string \| null | yes | free text or null |
+| `duration_minutes` | number \| null | no (defaults `null`) | whole minutes of elapsed/moving time; used to enforce bonus-activity thresholds. A missing/`null` value never crashes parsing. |
 | `confidence` | number | yes | 0.0 ≤ x ≤ 1.0 |
 
 ### Parsing & Validation (in [`bot/services/vision.py`](bot/services/vision.py))
@@ -239,14 +256,20 @@ Analyze the attached screenshot and return the JSON verdict per the schema.
 
 ### Verdict → Award Eligibility
 
-A verdict is **eligible for awarding** only if **all** are true:
+A verdict passes the **shared gating pipeline** only if **all** are true:
 - `is_garmin == true`
-- `activity_type == "running"` (only running is active now)
 - `is_completed == true`
 - `workout_date` is a valid, non-null ISO date
 - `confidence >= MIN_CONFIDENCE`
 
-If eligible, proceed to the date-window/points decision (Section 5). Otherwise IGNORE.
+`VisionVerdict.is_eligible()` intentionally does **not** restrict the activity
+type — the handler branches on `activity_type` after this gate:
+- `activity_type == "running"` → plan-based points (Section 5).
+- `activity_type in {"walking", "cycling", "strength"}` → flat 5-point bonus,
+  subject to the per-activity minimum duration (Section 5).
+- anything else (`other`/legacy) → silently IGNORE.
+
+If gated-in, proceed to the date-window/points decision (Section 5). Otherwise IGNORE.
 
 ---
 
@@ -302,18 +325,56 @@ return round(pts, 2)                     # EXACT fraction (2-dp), NOT rounded to
 | 5 | 6 | 3 |
 | 6 | 5 | 2.5 |
 
+### Bonus (non-running) activities — walking / cycling / strength
+
+Three **bonus** activity types award a flat **5 points** each, independently of
+the running plan. They go through the **same** gating pipeline as running
+(Garmin + completed + valid current-week date + confidence ≥ `MIN_CONFIDENCE` +
+dedup), but the points are fixed and **do not** affect the plan/streak/
+overachievement (the per-user weekly running **count** used for those still
+counts `activity_type == "running"` rows only).
+
+Constants live in [`bot/utils/points.py`](bot/utils/points.py):
+
+| Constant | Value | Meaning |
+|----------|-------|---------|
+| `BONUS_ACTIVITY_POINTS` | 5 | Flat points per qualifying bonus activity. |
+| `ACTIVITY_MIN_MINUTES` | `{"walking": 40, "cycling": 60, "strength": 15}` | Minimum `duration_minutes` to qualify. |
+| `BONUS_ACTIVITIES` | `{"walking", "cycling", "strength"}` | The set of bonus activity types. |
+
+Per-activity minimum duration & reply behaviour (uses the vision
+`duration_minutes` field):
+
+| Activity | Minimum | On/above minimum (flat 5) | Below minimum (no log, no points) | `activity_label` |
+|----------|:-------:|---------------------------|-----------------------------------|------------------|
+| walking | 40 min | `✅ Nice walk, {name}! +5 points.` | `⚠️ Walk is {dur} min — minimum is 40 min to earn points.` | `walk` |
+| cycling | 60 min | `✅ Nice ride, {name}! +5 points.` | `⚠️ Ride is {dur} min — minimum is 60 min to earn points.` | `ride` |
+| strength | 15 min | `✅ Nice strength session, {name}! +5 points.` | `⚠️ Strength/stretch is {dur} min — minimum is 15 min to earn points.` | `strength session` |
+
+- If `duration_minutes` is `null` (couldn't be read) for a bonus activity, the
+  bot replies `⚠️ Couldn't read the duration — no points awarded.` and does
+  **not** log/award.
+- The below-minimum and no-duration cases are the **only** bonus-activity paths
+  that reply while NOT logging; every other non-eligible path (old-week,
+  duplicate, non-Garmin, not completed, `other`) stays **silent** as before.
+- Qualifying bonus rows are written to `Log` (with the correct `activity_type`
+  and `points = 5`) via the same write-first + retry + dedup-recheck path as
+  running, and **count in the weekly/monthly leaderboards** (the aggregation
+  sums all rows in range regardless of `activity_type`).
+
 ### Decision Pseudocode
 
 ```
 function decide_and_process(message, verdict, image_hash):
-    # eligibility (Section 4)
-    if not (verdict.is_garmin and verdict.activity_type == "running"
-            and verdict.is_completed and verdict.workout_date is not None
+    # shared gating (Section 4): Garmin + completed + valid date + confidence
+    if not (verdict.is_garmin and verdict.is_completed
+            and verdict.workout_date is not None
             and verdict.confidence >= MIN_CONFIDENCE):
         return IGNORE   # silent
 
-    if ACTIVITY_POINTS.get(verdict.activity_type, 0) == 0:
-        return IGNORE   # silent (gate: running only)
+    activity = verdict.activity_type
+    if activity != "running" and activity not in BONUS_ACTIVITIES:
+        return IGNORE   # silent (other/legacy types are not awardable)
 
     tz = ZoneInfo("Europe/Nicosia")
     today = datetime.now(tz).date()
@@ -328,14 +389,26 @@ function decide_and_process(message, verdict, image_hash):
     if sheets.exists(user_id=message.from_user.id, image_hash=image_hash):
         return IGNORE   # silent
 
-    plan = sheets.get_plan(user_id)                        # default 3
-    so_far = sheets.count_user_workouts_in_week(user_id, week_start, week_end)
-    points = workout_points(plan, so_far)                  # plan-based value
+    if activity == "running":
+        plan = sheets.get_plan(user_id)                    # default 3
+        so_far = sheets.count_user_workouts_in_week(user_id, week_start, week_end)
+        points = workout_points(plan, so_far)              # plan-based value
+        reply = f"✅ Nice run, {name}! +{format_points(points)} points."
+    else:   # walking / cycling / strength — flat bonus, separate from the plan
+        dur = verdict.duration_minutes
+        if dur is None:
+            message.reply_text("⚠️ Couldn't read the duration — no points awarded.")
+            return NO_LOG
+        if dur < ACTIVITY_MIN_MINUTES[activity]:
+            message.reply_text(below_minimum_message(activity, dur))
+            return NO_LOG        # no log, no points
+        points = BONUS_ACTIVITY_POINTS                     # flat 5
+        reply = f"✅ Nice {activity_label(activity)}, {name}! +5 points."
 
     row = build_log_row(message, verdict, points, image_hash)
     sheets.append_row(row)                     # real-time log (write-first)
-    logger.info("Logged workout: user=%s date=%s points=%s", ...)
-    message.reply_text(f"✅ Nice run, {name}! +{points} points.")  # after write
+    logger.info("Logged workout: user=%s date=%s activity=%s points=%s", ...)
+    message.reply_text(reply)                  # after confirmed write
     return AWARDED
 ```
 
@@ -402,7 +475,7 @@ def build_scheduler(bot, sheets, leaderboard, target_chat_id, tz):
 
 1. Read all rows from worksheet `Log` (via `SheetsService.read_rows_in_range()`), skipping the header.
 2. Filter rows where `workout_date` (column E) falls in `[range_start, range_end]` (inclusive dates).
-3. Group by `telegram_user_id`; sum `points` for **all** rows in range **regardless of `activity_type`** (so `running` workout points **and** `streak_bonus` points both count); keep the most recent `display_name`/`telegram_username` for that user id.
+3. Group by `telegram_user_id`; sum `points` for **all** rows in range **regardless of `activity_type`** (so `running` workout points, the `walking`/`cycling`/`strength` 5-point bonuses, **and** `streak_bonus` points all count); keep the most recent `display_name`/`telegram_username` for that user id.
 4. Sort descending by total points; tie-break by `display_name` alphabetically.
 
 ```

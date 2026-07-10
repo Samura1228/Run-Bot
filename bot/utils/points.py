@@ -28,6 +28,34 @@ OVERACHIEVEMENT_RATE = 0.5
 # index = consecutive completed weeks (capped at the last index).
 STREAK_BONUS_PER_WEEK = [0, 0, 0, 5, 10, 15, 20]
 
+# --- Bonus (non-running) activity model ----------------------------------- #
+# Walking / cycling / strength are SEPARATE bonus points: they award a flat
+# value once a minimum duration is met, and DO NOT count toward the running
+# plan, streak, or overachievement (those remain running-only).
+BONUS_ACTIVITY_POINTS = 5
+# Minimum duration (in minutes) required to earn the flat bonus per activity.
+ACTIVITY_MIN_MINUTES = {"walking": 40, "cycling": 60, "strength": 15}
+# The set of bonus activity types (walking, cycling, strength).
+BONUS_ACTIVITIES = set(ACTIVITY_MIN_MINUTES.keys())
+
+# Friendly labels used in the ✅ success reply for each activity type.
+_ACTIVITY_LABELS = {
+    "running": "run",
+    "walking": "walk",
+    "cycling": "ride",
+    "strength": "strength session",
+}
+
+
+def activity_label(activity_type: str) -> str:
+    """Return a friendly word for an activity type, used in the reply text.
+
+    running→"run", walking→"walk", cycling→"ride",
+    strength→"strength session". Falls back to the raw type if unknown.
+    """
+
+    return _ACTIVITY_LABELS.get(activity_type, activity_type)
+
 # Default awardable-activity table. ``main`` may override the running value at
 # runtime from the ``POINTS_PER_RUN`` setting via :func:`build_activity_points`.
 # NOTE: with the plan-based model the per-workout value is computed by

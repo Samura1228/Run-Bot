@@ -27,11 +27,21 @@ from bot.services.vision import ClaudeVisionService
 from bot.utils.dates import current_week_bounds, in_range
 from bot.utils.hashing import compute_image_hash
 from bot.utils.points import (
+    ACTIVITY_MIN_MINUTES,
+    BONUS_ACTIVITIES,
+    BONUS_ACTIVITY_POINTS,
     DEFAULT_PLAN,
+    activity_label,
     format_points,
-    resolve_points,
     workout_points,
 )
+
+# Human-friendly nouns for the below-minimum-duration warning per activity.
+_BELOW_MIN_NOUN = {
+    "walking": "Walk",
+    "cycling": "Ride",
+    "strength": "Strength/stretch",
+}
 
 logger = logging.getLogger(__name__)
 
@@ -114,12 +124,14 @@ class PhotoHandler:
             )
             return
 
-        # Gate: only awardable activity types (running) proceed. The actual
-        # per-workout point value comes from the plan-based helper below.
-        if resolve_points(verdict.activity_type, self._activity_points) == 0:
+        # Gate: only awardable activity types proceed. Running uses the
+        # plan-based model; walking/cycling/strength are flat bonus activities.
+        # Anything else ("other"/unrecognized) is silently ignored.
+        activity = verdict.activity_type
+        if activity != "running" and activity not in BONUS_ACTIVITIES:
             logger.info(
-                "Activity type %r has no points mapping; ignoring.",
-                verdict.activity_type,
+                "Activity type %r is not awardable; ignoring.",
+                activity,
             )
             return
 
@@ -152,40 +164,97 @@ class PhotoHandler:
         except Exception as exc:
             logger.error("Race-safe dedup re-check failed: %s", exc)
 
-        # 7b) Plan-based points: fetch the user's plan and count how many running
-        # workouts they've ALREADY logged this current week (excluding this one
-        # and excluding streak_bonus rows / other users), then compute points.
-        try:
-            plan = await self._sheets.get_plan(user.id)
-        except Exception as exc:
-            logger.error(
-                "Failed to fetch plan for user %s; using default: %s",
-                user.id,
-                exc,
-            )
-            plan = None
-        if plan is None:
-            plan = DEFAULT_PLAN
-
-        try:
-            workouts_so_far = await self._sheets.count_user_workouts_in_week(
-                user.id, week_start, week_end
-            )
-        except Exception as exc:
-            logger.error(
-                "Failed to count this-week workouts for user %s; assuming 0: %s",
-                user.id,
-                exc,
-            )
-            workouts_so_far = 0
-
-        points = workout_points(plan, workouts_so_far)
-
-        # 8) Build the row and append.
+        # 7b) Points decision — branch by activity_type.
+        # Identity fields are needed for both the row and the reply.
         username = (user.username or "").strip()
-        display_name = " ".join(
+        display_name_early = " ".join(
             part for part in [user.first_name, user.last_name] if part
         ).strip()
+        who = f"@{username}" if username else (
+            display_name_early or user.first_name or "runner"
+        )
+
+        if activity == "running":
+            # RUNNING (unchanged): plan-based fractional points. Count how many
+            # running workouts the user has ALREADY logged this current week
+            # (excluding this one, streak_bonus rows, and other users), then
+            # compute the plan-based per-workout value.
+            try:
+                plan = await self._sheets.get_plan(user.id)
+            except Exception as exc:
+                logger.error(
+                    "Failed to fetch plan for user %s; using default: %s",
+                    user.id,
+                    exc,
+                )
+                plan = None
+            if plan is None:
+                plan = DEFAULT_PLAN
+
+            try:
+                workouts_so_far = await self._sheets.count_user_workouts_in_week(
+                    user.id, week_start, week_end
+                )
+            except Exception as exc:
+                logger.error(
+                    "Failed to count this-week workouts for user %s; "
+                    "assuming 0: %s",
+                    user.id,
+                    exc,
+                )
+                workouts_so_far = 0
+
+            points = workout_points(plan, workouts_so_far)
+            reply_text = f"✅ Nice run, {who}! +{format_points(points)} points."
+        else:
+            # BONUS ACTIVITY (walking/cycling/strength): flat points once the
+            # per-activity minimum duration is met. These are SEPARATE bonus
+            # points — they do NOT touch the plan/streak/overachievement.
+            dur = verdict.duration_minutes
+            if dur is None:
+                # Duration couldn't be read → can't score. No log, no points.
+                try:
+                    await message.reply_text(
+                        "⚠️ Couldn't read the duration — no points awarded."
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.error("Failed to send no-duration reply: %s", exc)
+                logger.info(
+                    "Bonus activity %r for user %s has no readable duration; "
+                    "not logged.",
+                    activity,
+                    user.id,
+                )
+                return
+
+            minimum = ACTIVITY_MIN_MINUTES[activity]
+            if dur < minimum:
+                # Below the minimum → do NOT log, do NOT award; short reply.
+                noun = _BELOW_MIN_NOUN[activity]
+                try:
+                    await message.reply_text(
+                        f"⚠️ {noun} is {dur} min — minimum is {minimum} min "
+                        f"to earn points."
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.error("Failed to send below-minimum reply: %s", exc)
+                logger.info(
+                    "Bonus activity %r for user %s is %d min (< %d min "
+                    "minimum); not logged.",
+                    activity,
+                    user.id,
+                    dur,
+                    minimum,
+                )
+                return
+
+            points = float(BONUS_ACTIVITY_POINTS)
+            reply_text = (
+                f"✅ Nice {activity_label(activity)}, {who}! +5 points."
+            )
+
+        # 8) Build the row and append.
+        display_name = display_name_early
 
         # Opportunistically keep the username directory fresh so coach commands
         # can resolve @username → id for people who post. Best-effort only: it
@@ -227,22 +296,20 @@ class PhotoHandler:
             # Silent failure — observable via the ERROR log above only.
             return
 
-        # 9) Success: INFO log first, then a chat reply confirming the run.
+        # 9) Success: INFO log first, then a chat reply confirming the activity.
         logger.info(
-            "Logged workout: user=%s date=%s points=%s",
+            "Logged workout: user=%s date=%s activity=%s points=%s",
             user.id,
             verdict.workout_date,
+            activity,
             points,
         )
 
-        # The row is already safely written. Send a plain-text confirmation
-        # (no parse_mode to avoid Markdown/HTML injection via the name). Prefer
-        # the poster's @username, else their display name / first name.
-        who = f"@{username}" if username else (display_name or user.first_name or "runner")
+        # The row is already safely written. Send the pre-computed plain-text
+        # confirmation (no parse_mode to avoid Markdown/HTML injection via the
+        # name). The exact wording was chosen per-activity above.
         try:
-            await message.reply_text(
-                f"✅ Nice run, {who}! +{format_points(points)} points."
-            )
+            await message.reply_text(reply_text)
         except TelegramError as exc:
             # The log is already saved; a failed reply must not crash the
             # handler or undo the write. Log and move on.
