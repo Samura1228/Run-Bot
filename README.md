@@ -341,6 +341,10 @@ Slash commands help configure plans and verify the bot's integrations at
 runtime. They work in any chat (DM the bot or run them in the group) and never
 leak secrets — only a concise result is sent to chat.
 
+> On startup the bot registers a **command menu** via Telegram's
+> `setMyCommands`, so the blue **Menu** button (and the `/` autocomplete list)
+> shows all commands in every chat automatically.
+
 **Plan commands:**
 
 - **`/setplan N`** — set your weekly plan to `N` workouts/week (`N` between

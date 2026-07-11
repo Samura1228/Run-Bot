@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import sys
 
-from telegram import Update
+from telegram import BotCommand, Update
 from telegram.ext import (
     Application,
     ApplicationBuilder,
@@ -108,6 +108,25 @@ def build_application(settings: Settings) -> Application:
         )
         scheduler.start()
         app.bot_data["scheduler"] = scheduler
+
+        # Register the bot's command menu (the blue "Menu" button and the "/"
+        # autocomplete list). Default scope + default language is sufficient to
+        # surface these in every chat (private + groups). Best-effort: if this
+        # fails we log a WARNING and keep running — the bot must still start.
+        commands = [
+            BotCommand("setplan", "Set your weekly plan (2–6 workouts)"),
+            BotCommand("myplan", "Show your plan and streak"),
+            BotCommand("whoami", "Show your Telegram ID (or reply to someone)"),
+            BotCommand("status", "Check bot health (Telegram/AI/Sheets)"),
+            BotCommand("testsheet", "Test the Google Sheet connection"),
+            BotCommand("chatid", "Show this chat's ID"),
+        ]
+        try:
+            await app.bot.set_my_commands(commands)
+            logger.info("Registered %d bot commands", len(commands))
+        except Exception as exc:  # pragma: no cover - best-effort, non-fatal
+            logger.warning("Failed to register bot commands (setMyCommands): %s", exc)
+
         if settings.target_chat_id is not None:
             logger.info(
                 "TARGET_CHAT_ID is set (%s); leaderboards will be posted there.",
