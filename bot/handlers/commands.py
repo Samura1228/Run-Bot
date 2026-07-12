@@ -319,59 +319,78 @@ async def setplan_command(
     message = update.effective_message
     if message is None:
         return
-    caller = message.from_user
-    if caller is None:
-        return
 
-    sheets = _get_sheets(context)
-    if sheets is None:
-        await _safe_reply(message, "❌ Could not set plan — internal error, see logs.")
-        return
-    settings = _get_settings(context)
-    if settings is None:
-        await _safe_reply(message, "❌ Could not set plan — internal error, see logs.")
-        return
-
-    args = context.args or []
-
-    # Parse the plan from the LAST integer token; validate 2–6.
-    requested = _last_int_arg(args)
-    if requested is None or not (MIN_PLAN <= requested <= MAX_PLAN):
-        await _safe_reply(message, _SETPLAN_USAGE)
-        return
-
-    # Resolve who is being set (self by default; coach targeting via reply /
-    # @username / text_mention).
+    # Defensive wrapper: guarantee this command NEVER fails silently. Any
+    # unexpected exception (e.g. a raise inside target resolution that is not a
+    # _TargetError) is logged AND surfaced to the user with a short message,
+    # rather than escaping to the global error handler (which logs but sends
+    # nothing to chat). Specific, expected outcomes below still produce their
+    # own, more precise replies.
     try:
-        target_id, target_username, target_display = await _resolve_target(
-            message, caller, args, sheets, settings
-        )
-    except _TargetError as exc:
-        await _safe_reply(message, exc.reply)
-        return
+        caller = message.from_user
+        if caller is None:
+            return
 
-    plan = clamp_plan(requested)
-    try:
-        await sheets.set_plan(target_id, target_username, plan)
-    except Exception as exc:
-        logger.error("Failed to set plan for user %s: %s", target_id, exc)
-        await _safe_reply(message, "❌ Could not set plan — please try again later.")
-        return
+        sheets = _get_sheets(context)
+        if sheets is None:
+            await _safe_reply(
+                message, "❌ Could not set plan — internal error, see logs."
+            )
+            return
+        settings = _get_settings(context)
+        if settings is None:
+            await _safe_reply(
+                message, "❌ Could not set plan — internal error, see logs."
+            )
+            return
 
-    per_workout = format_points(STANDARD_POINTS_PER_WEEK / plan)
-    who = _who_label(target_id, target_username, target_display)
-    if target_id == caller.id:
+        args = context.args or []
+
+        # Parse the plan from the LAST integer token; validate 2–6.
+        requested = _last_int_arg(args)
+        if requested is None or not (MIN_PLAN <= requested <= MAX_PLAN):
+            await _safe_reply(message, _SETPLAN_USAGE)
+            return
+
+        # Resolve who is being set (self by default; coach targeting via reply /
+        # @username / text_mention).
+        try:
+            target_id, target_username, target_display = await _resolve_target(
+                message, caller, args, sheets, settings
+            )
+        except _TargetError as exc:
+            await _safe_reply(message, exc.reply)
+            return
+
+        plan = clamp_plan(requested)
+        try:
+            await sheets.set_plan(target_id, target_username, plan)
+        except Exception as exc:
+            logger.error("Failed to set plan for user %s: %s", target_id, exc)
+            await _safe_reply(
+                message, "❌ Could not set plan — please try again later."
+            )
+            return
+
+        per_workout = format_points(STANDARD_POINTS_PER_WEEK / plan)
+        who = _who_label(target_id, target_username, target_display)
+        if target_id == caller.id:
+            await _safe_reply(
+                message,
+                f"✅ Plan set: {plan} workouts/week. Points per workout: "
+                f"{per_workout} (complete your plan for ~{STANDARD_POINTS_PER_WEEK} "
+                "pts/week).",
+            )
+        else:
+            await _safe_reply(
+                message,
+                f"✅ Plan set for {who}: {plan} workouts/week. "
+                f"Points per workout: {per_workout}.",
+            )
+    except Exception as exc:  # noqa: BLE001 - defensive: never fail silently
+        logger.error("Unexpected error handling /setplan: %s", exc, exc_info=exc)
         await _safe_reply(
-            message,
-            f"✅ Plan set: {plan} workouts/week. Points per workout: "
-            f"{per_workout} (complete your plan for ~{STANDARD_POINTS_PER_WEEK} "
-            "pts/week).",
-        )
-    else:
-        await _safe_reply(
-            message,
-            f"✅ Plan set for {who}: {plan} workouts/week. "
-            f"Points per workout: {per_workout}.",
+            message, "⚠️ Something went wrong setting the plan. Try again."
         )
 
 
