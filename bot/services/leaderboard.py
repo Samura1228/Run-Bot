@@ -71,10 +71,28 @@ class LeaderboardService:
         Each line is ``{name}  - {points} points`` (note the two spaces
         before the hyphen, per the requested layout) with a trailing medal
         for ranks 1–3 and no trailing emoji for ranks 4+.
+
+        Ranks use **standard competition ranking ("1224" style)**: users with
+        the SAME point total share the SAME rank, and the next lower total's
+        rank equals its 1-based position in the sorted list (so ranks are
+        skipped after a tie). ``entries`` MUST already be sorted by points
+        descending with a stable deterministic secondary sort (see
+        :meth:`aggregate`), which keeps ordering within a tie consistent while
+        still assigning every tied user the same rank number/medal. When a rank
+        is skipped due to a tie (e.g. nobody is 2nd because two share 1st), that
+        medal simply does not appear.
         """
 
         lines: list[str] = []
-        for rank, entry in enumerate(entries, start=1):
+        prev_points: float | None = None
+        rank = 0
+        for position, entry in enumerate(entries, start=1):
+            # Standard competition ranking: a new (lower) total takes the rank
+            # equal to its 1-based position; equal totals keep the prior rank.
+            if prev_points is None or entry.points != prev_points:
+                rank = position
+            prev_points = entry.points
+
             name = entry.label()
             line = f"{name}  - {format_points(entry.points)} points"
             medal = _MEDALS.get(rank)
