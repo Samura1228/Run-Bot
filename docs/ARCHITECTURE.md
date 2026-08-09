@@ -1,7 +1,9 @@
 # Run Bot — Architecture & Blueprint
 
 > **Status:** Design blueprint (implementation-ready). No application code is included here.
-> **Purpose:** A Python Telegram bot that passively monitors a running group, validates Garmin Connect activity screenshots via Claude vision, awards points (plan-based for running; flat bonus points for walking/cycling/strength), logs to Google Sheets, and posts weekly/monthly leaderboards.
+> **Purpose:** A Python Telegram bot that passively monitors a running group, validates **Garmin Connect *and* WHOOP** workout screenshots via Claude vision, awards points (plan-based for running; flat bonus points for walking/cycling/strength), logs to Google Sheets, and posts weekly/monthly leaderboards.
+>
+> **Supported screenshot sources:** **Garmin Connect** (English **and** Russian UI, with distance/pace/route map) and **WHOOP** (English UI, `ACTIVITY STRAIN` + `DURATION H:MM:SS` + HR-zone breakdown, typically with **no** distance/pace/map). Both are scored **identically** — there is no separate WHOOP scoring path. WHOOP **daily overview** screens (Strain / Recovery / Sleep / Health Monitor / coach cards) are **rejected** like Garmin achievements screens. See Section 4.
 >
 > **Supported activities:** `running` (plan-based fractional points — the core loop), plus three **bonus** activities that award a flat **5 points** each once a minimum duration is met: **walking** (≥ **40 min**), **cycling** (≥ **60 min**), and **strength** (strength training / stretching / yoga / mobility, ≥ **15 min**). Bonus activities go through the **same** gating pipeline as running (Garmin, completed, current-week, dedup) but are **separate**: they do **not** count toward the running plan, streak, or overachievement. They **do** count in the weekly/monthly leaderboards.
 
@@ -13,7 +15,7 @@
 
 1. Joins a Telegram group and passively listens to all messages.
 2. On any **photo** message, downloads the image, hashes the raw bytes (dedup), and sends it to **Claude vision**.
-3. Claude returns a **strict JSON verdict** (is it a Garmin running screenshot, completed, with a workout date, etc.).
+3. Claude returns a **strict JSON verdict** (is it a supported — Garmin **or** WHOOP — workout screenshot, completed, with a workout date, etc.).
 4. The bot applies **points/date-window logic**: if the workout date falls in the **current Mon–Sun week** (Europe/Nicosia) → award points and log to Google Sheets (row written first, then an INFO log line), then reply in chat. **Running** uses the user's **weekly plan** (see Section 5) and replies `✅ Nice run, {name}! +{points} points.`. **Walking/cycling/strength** award a flat **5 points** once their minimum duration is met and reply `✅ Nice {walk|ride|strength session}, {name}! +5 points.`; below their minimum duration the bot replies with a short warning and awards nothing. Anything else (old-week, duplicate, non-Garmin, not completed, `other`) → silently ignored.
 5. An **APScheduler** (AsyncIOScheduler, timezone `Europe/Nicosia`) runs on the same event loop and posts a **weekly leaderboard** (Monday 09:00) and a **monthly leaderboard** (1st of month 09:00). The weekly job also performs a **streak rollover** (awarding streak bonuses) just before posting the board.
 6. **Google Sheets is the single source of truth.** Leaderboards are computed by reading and aggregating the sheet, so restarts lose no data.
@@ -182,44 +184,146 @@ Auto-created (with its header row) on first run alongside the `Log` worksheet. O
 - Use a **system prompt** that pins the role, the strict JSON schema, and the "return JSON only, no prose" rule. The prompt classifies `activity_type` into `running`/`walking`/`cycling`/`strength`/`other` (Garmin title/icon cues: Бег/Run→running, Ходьба/Walk→walking, Велоспорт/Cycling/Ride→cycling, Силовая/Strength/Стретчинг/Stretching/Йога/Yoga→strength) and extracts `duration_minutes` (whole minutes) so the bot can enforce per-activity duration thresholds numerically.
 - Set a low `temperature` (e.g. `0`) and a modest `max_tokens`.
 
+### Supported screenshot sources: **Garmin Connect** and **WHOOP**
+
+Both apps are first-class, go through the **same** pipeline and score
+**identically** (there is no separate WHOOP scoring path). The verdict field
+`is_garmin` means "from a **supported** app" (the historical name is kept), and
+`source` records which one (`"garmin"` / `"whoop"` / `null`).
+
+**WHOOP single-activity markers the prompt teaches (English UI, dark theme).** A
+screen is accepted as a completed WHOOP workout when it shows:
+
+- an **ALL-CAPS activity title** at the top next to a small activity icon, with a
+  wall-clock time range beneath it (e.g. `WALKING` / `8:12 PM to 9:11 PM`,
+  `STRENGTH TRAINER` / `11:08 to 12:03`);
+- a large blue **`ACTIVITY STRAIN`** number (e.g. `4.1`, `7.2`) — WHOOP's
+  signature metric — and sometimes a second big number such as
+  **`ACTIVITY STEPS`** (`4,425`);
+- a blue **heart-rate line graph** with BPM gridlines (75/100/125/150) and
+  start/end times;
+- a row with **`TYPICAL RANGE`** on the left and **`DURATION H:MM:SS`** on the
+  right (e.g. `DURATION 0:59:20`);
+- a stacked **HR zone breakdown** (`ZONE 5` … `ZONE 0`, each with a BPM range
+  like `186+ BPM` / `117-144 BPM` / `<117 BPM`, a percentage and a time);
+- optional trailing sections (`KEY STATISTICS`, `VS. 30 DAY AVERAGE`,
+  `Zone ranges automatically updated on …`, `HR Settings`, WHOOP logo badge, a
+  WHOOP coach message bubble).
+
+> **WHOOP workout screens show NO distance, NO pace and NO GPS/route map.** That
+> is normal and must never cause a rejection — the prompt states this explicitly
+> so the Garmin-oriented "route map / stat grid" cues don't gate WHOOP.
+
+**WHOOP activity-name mapping** (matched **case-insensitively**; also applied
+code-side as a deterministic safety net via `WHOOP_ACTIVITY_MAP` /
+`map_whoop_activity()` in [`bot/services/vision.py`](bot/services/vision.py),
+using the verbatim `activity_title` returned by the model):
+
+| WHOOP title | Activity type |
+|---|---|
+| `RUNNING`, `RUN`, `TRAIL RUNNING`, `TREADMILL` | `running` |
+| `WALKING`, `WALK`, `HIKING`, `HIKE` | `walking` |
+| `CYCLING`, `BIKING`, `SPIN`, `SPINNING`, `INDOOR CYCLING` | `cycling` |
+| `STRENGTH TRAINER`, `WEIGHTLIFTING`, `FUNCTIONAL FITNESS`, `CROSSFIT`, `HIIT`, `PILATES`, `YOGA`, `STRETCHING`, `MOBILITY` | `strength` |
+| anything else (e.g. `SWIMMING`, `ROWING`, `BOXING`) | `other` → not awardable (existing handling) |
+
+**WHOOP duration.** The authoritative value is the **`DURATION H:MM:SS`** field
+in the `TYPICAL RANGE` row — **not** the per-zone times and **not** the
+wall-clock range under the title. It is converted to `duration_minutes` by
+taking hours×60 + minutes and **dropping the seconds**:
+`0:59:20` → **59**, `0:55:59` → **55**, `1:40:24` → **100**, `1:00:00` → **60**.
+`parse_hms_minutes()` re-derives this from the raw `duration` string so an
+off-by-one model rounding can never push a workout under its minimum.
+
+**WHOOP daily-overview screens are rejected** (no points), reusing the existing
+`is_achievement` flag so they hit the same rejection path as Garmin
+achievements/badges: day/weekly **Strain** (`DAY STRAIN`), **Recovery**
+(`RECOVERY`, recovery %, HRV/RHR cards), **Sleep** (`SLEEP PERFORMANCE`, sleep
+stages/hours), **Health Monitor**, and coach/insight summary cards. The
+distinguishing rule encoded in the prompt: a **single-activity** screen has ONE
+activity title + `DURATION` + a zone breakdown for that one workout, while a
+**daily overview** shows day-level scores (Strain/Recovery/Sleep percentages)
+without a single activity's duration. Such screens must return
+`is_achievement=true`, `is_completed=false`, `activity_type="other"`,
+`duration_minutes=null`, and the bot replies:
+
+```
+⚠️ This looks like a summary/achievements screen, not a completed workout. Please send the workout summary screenshot from Garmin or WHOOP.
+```
+
+**Missing date (WHOOP).** WHOOP workout screens usually show only a time-of-day
+range and no date, so the prompt forbids inventing one (`workout_date=null`) and
+[`bot/handlers/photo.py`](bot/handlers/photo.py) falls back to the
+**submission/message date** (the Telegram message timestamp converted to
+`TIMEZONE`) before the eligibility gate. Nothing is rejected and no empty date is
+ever written. Garmin screenshots keep whatever date the model read.
+
 ### System Prompt (verbatim intent)
 
 ```
 You are an image verification assistant for a fitness club.
-You will be shown a single screenshot. Determine whether it is a Garmin Connect
-activity screenshot for a COMPLETED (not planned/scheduled) activity, classify
-the activity type, and extract structured details.
+You will be shown a single screenshot. Determine whether it is a workout
+screenshot from a SUPPORTED tracker app — Garmin Connect OR WHOOP — for a
+COMPLETED (not planned/scheduled) activity, decide whether it is instead a
+summary screen (achievements/badges, or a WHOOP daily overview), classify the
+activity type, and extract structured details.
 
 Respond with a SINGLE valid JSON object and NOTHING else — no markdown, no code
 fences, no commentary. Use exactly this schema and these keys:
 
 {
-  "is_garmin": boolean,        // true only if this is clearly a Garmin Connect screenshot
-  "activity_type": string,     // one of: "running", "walking", "cycling", "strength", "other"
-  "is_completed": boolean,     // true if the activity is completed with real recorded data (not a planned/scheduled workout)
-  "workout_date": string|null, // the activity date in ISO "YYYY-MM-DD" if visible, else null
-  "distance": string|null,     // as shown, e.g. "5.02 km", else null
-  "duration": string|null,     // as shown, e.g. "00:28:14", else null
-  "duration_minutes": number|null, // total elapsed/moving time in WHOLE MINUTES (rounded), else null
-  "confidence": number         // 0.0–1.0, your overall confidence in this verdict
+  "is_garmin": boolean,          // true if from a SUPPORTED app: Garmin Connect OR WHOOP
+  "source": string|null,         // "garmin", "whoop", or null when unclear
+  "is_achievement": boolean,     // true for achievements/badges OR a WHOOP daily overview (Strain/Recovery/Sleep/Health Monitor/coach card)
+  "activity_title": string|null, // the title verbatim, e.g. "WALKING", "STRENGTH TRAINER", "Бег"
+  "activity_type": string,       // one of: "running", "walking", "cycling", "strength", "other"
+  "is_completed": boolean,       // true if the activity is completed with real recorded data (not a planned/scheduled workout)
+  "workout_date": string|null,   // the activity date in ISO "YYYY-MM-DD" if visible, else null
+  "distance": string|null,       // as shown, e.g. "5.02 km", else null (WHOOP workouts: null)
+  "duration": string|null,       // as shown, e.g. "00:28:14" (Garmin) or "0:59:20" (WHOOP DURATION), else null
+  "duration_minutes": number|null, // total elapsed/moving time in WHOLE MINUTES, else null
+  "confidence": number           // 0.0–1.0, your overall confidence in this verdict
 }
 
-Activity classification cues (Garmin title/icon):
-- Бег / Run / Running / Treadmill → "running"
-- Ходьба / Walk / Walking → "walking"
-- Велоспорт / Cycling / Bike / Ride → "cycling"
-- Силовая / Strength / Стретчинг / Stretching / Йога / Yoga / Mobility → "strength"
-  (covers strength training AND stretching/yoga/mobility)
-- Anything else (e.g. swimming) → "other"
+Garmin Connect layout cues: localized tab bar (Обзор/Статистика/...), a route
+map with a low→high pace heat-map legend, an activity title + date/time, and a
+stat grid (Distance/Расстояние, Avg Pace/Средний темп, Total Time/Общее время,
+HR, Calories).
+
+WHOOP single-activity layout cues: an ALL-CAPS activity title + a wall-clock
+time range, a large "ACTIVITY STRAIN" number (sometimes "ACTIVITY STEPS"), a
+blue HR graph with BPM gridlines, a "TYPICAL RANGE … DURATION H:MM:SS" row, and
+a "ZONE 5 … ZONE 0" BPM/percentage/time breakdown. WHOOP workouts show NO
+distance, NO pace and NO map — that is normal and must NOT cause a rejection.
+
+WHOOP daily overviews are NOT workouts (is_achievement=true, is_completed=false,
+activity_type="other", duration_minutes=null): DAY STRAIN, RECOVERY (recovery %,
+HRV/RHR), SLEEP PERFORMANCE / sleep stages, Health Monitor, coach/insight cards.
+Rule: a single-activity screen has ONE title + DURATION + zone breakdown; a
+daily overview shows day-level scores without a single activity's duration.
+
+Activity classification cues (title/icon, matched CASE-INSENSITIVELY):
+- Garmin: Бег/Run/Running/Treadmill → "running"; Ходьба/Walk/Walking →
+  "walking"; Велоспорт/Cycling/Bike/Ride → "cycling"; Силовая/Strength/
+  Стретчинг/Stretching/Йога/Yoga/Mobility → "strength"; anything else → "other".
+- WHOOP: RUNNING/RUN/TRAIL RUNNING/TREADMILL → "running"; WALKING/WALK/HIKING/
+  HIKE → "walking"; CYCLING/BIKING/SPIN/SPINNING/INDOOR CYCLING → "cycling";
+  STRENGTH TRAINER/WEIGHTLIFTING/FUNCTIONAL FITNESS/CROSSFIT/HIIT/PILATES/YOGA/
+  STRETCHING/MOBILITY → "strength"; anything else (SWIMMING, ROWING…) → "other".
 
 Duration:
-- "duration_minutes" = the elapsed/moving time as a whole number of minutes,
-  rounded to nearest. "1:08:51" → 69; "00:28:14" → 28; "45 мин" → 45. If only a
-  distance is shown and no time, set duration_minutes=null.
+- Garmin: "duration_minutes" = elapsed/moving time in whole minutes, rounded to
+  nearest. "1:08:51" → 69; "00:28:14" → 28; "45 мин" → 45.
+- WHOOP: use ONLY the "DURATION H:MM:SS" value next to "TYPICAL RANGE" (never
+  the zone times, never the wall-clock range) and DROP the seconds:
+  "0:59:20" → 59; "0:55:59" → 55; "1:40:24" → 100.
+- If no time is visible at all, set duration_minutes=null.
 
 Rules:
-- If it is not a Garmin screenshot, set is_garmin=false and confidence accordingly.
-- Never invent a date; if the date is not clearly visible, set workout_date=null.
+- If it is not a Garmin/WHOOP screenshot, set is_garmin=false and confidence accordingly.
+- Never invent a date; if the date is not clearly visible (WHOOP usually shows
+  only a time range), set workout_date=null — the bot falls back to the
+  submission date.
 - Do not add extra keys. Do not omit keys.
 ```
 
@@ -233,7 +337,9 @@ Analyze the attached screenshot and return the JSON verdict per the schema.
 
 | Field | Type | Required | Constraints |
 |-------|------|----------|-------------|
-| `is_garmin` | boolean | yes | — |
+| `is_garmin` | boolean | yes | "from a **supported** app" — Garmin Connect **or** WHOOP (name kept for compatibility). |
+| `source` | string \| null | no (defaults `null`) | enum: `garmin`, `whoop`, or `null`. Informational; drives the WHOOP-only title/duration normalization. |
+| `activity_title` | string \| null | no (defaults `null`) | The title verbatim (e.g. `WALKING`, `STRENGTH TRAINER`, `Бег`); used by the WHOOP label mapping. |
 | `activity_type` | string | yes | enum: `running`, `walking`, `cycling`, `strength`, `other` (the model also tolerates legacy `swimming`/`unknown`, treated as non-awardable) |
 | `is_completed` | boolean | yes | — |
 | `workout_date` | string \| null | yes | ISO `YYYY-MM-DD` when non-null |
@@ -257,9 +363,10 @@ Analyze the attached screenshot and return the JSON verdict per the schema.
 ### Verdict → Award Eligibility
 
 A verdict passes the **shared gating pipeline** only if **all** are true:
-- `is_garmin == true`
+- `is_garmin == true` (Garmin **or** WHOOP)
 - `is_completed == true`
-- `workout_date` is a valid, non-null ISO date
+- `is_achievement == false` (not an achievements/badges screen and not a WHOOP daily overview)
+- `workout_date` is a valid, non-null ISO date — when the screenshot showed no date at all (typical for WHOOP) the handler has already substituted the **submission/message date** before this gate
 - `confidence >= MIN_CONFIDENCE`
 
 `VisionVerdict.is_eligible()` intentionally does **not** restrict the activity
@@ -285,9 +392,17 @@ If gated-in, proceed to the date-window/points decision (Section 5). Otherwise I
 
 > Because comparison is date-based (not datetime), there is no ambiguity around midnight or DST for the eligibility check; the Europe/Nicosia timezone is only used to determine what "today" is.
 
+### Season start date (points/leaderboard reset cutoff)
+
+A configurable **season start date** (`SEASON_START_DATE`, default **2026-07-12**, exposed as `Settings.season_start_date`) defines a hard cutoff for **all** points/leaderboard aggregation. Any submission whose `workout_date` is **before** the season start date is ignored entirely, so a new season effectively restarts everyone at **zero**.
+
+The cutoff is applied at the single source of truth — the date-filtered read methods in [`bot/services/sheets.py`](bot/services/sheets.py): `read_rows_in_range()` (used by the leaderboard and the streak rollover) and `count_user_workouts_in_week()` (used by the per-workout points calculation and the streak rollover) skip any row with `workout_date < season_start_date` via the shared `_before_season()` helper. Because points are stored **per-row** (not as a running cumulative total), every user total is recomputed from qualifying rows on each read — the reset is fully effective without editing or deleting any data.
+
+**What is NOT affected:** the reset is purely a read-time cutoff. Old `Log` rows are left untouched (nothing is deleted). User registrations and coach-assigned plans/streaks live in the separate `Plans` worksheet and are **never** filtered by this cutoff — they remain fully intact. Dedup (`is_duplicate()`) also ignores the cutoff so a pre-season screenshot can never be re-submitted.
+
 ### Plan-Based Points Model
 
-Each user has a weekly **plan** — the number of workouts/week they aim for — stored in the `Plans` worksheet. Plans are set with `/setplan N` and clamped to `[MIN_PLAN, MAX_PLAN]` = **2–6** (five plans: 2, 3, 4, 5, 6); the default is **3** for users who never set one.
+Each user has a weekly **plan** — the number of workouts/week they aim for — stored in the `Plans` worksheet. Plans are set **by a coach only** with `/setplan @user N` (or by replying to the member) and clamped to `[MIN_PLAN, MAX_PLAN]` = **2–6** (five plans: 2, 3, 4, 5, 6); the default is **3** for users whose coach never set one. Regular users cannot set up their own plan (`/setplan` rejects non-coaches with `Only your coach can set up workouts for you.`).
 
 Constants live in [`bot/utils/points.py`](bot/utils/points.py):
 
@@ -474,7 +589,7 @@ def build_scheduler(bot, sheets, leaderboard, target_chat_id, tz):
 ### Aggregation ([`bot/services/leaderboard.py`](bot/services/leaderboard.py))
 
 1. Read all rows from worksheet `Log` (via `SheetsService.read_rows_in_range()`), skipping the header.
-2. Filter rows where `workout_date` (column E) falls in `[range_start, range_end]` (inclusive dates).
+2. Filter rows where `workout_date` (column E) falls in `[range_start, range_end]` (inclusive dates) **and** is on or after `SEASON_START_DATE` (pre-season rows are excluded so the leaderboard reflects only the current season — see Section 5).
 3. Group by `telegram_user_id`; sum `points` for **all** rows in range **regardless of `activity_type`** (so `running` workout points, the `walking`/`cycling`/`strength` 5-point bonuses, **and** `streak_bonus` points all count); keep the most recent `display_name`/`telegram_username` for that user id.
 4. Sort descending by total points; tie-break by `display_name` alphabetically.
 
@@ -547,7 +662,8 @@ Sam  - 20 points
 | `TIMEZONE` | no | IANA timezone; default `Europe/Nicosia`. Used by scheduler & date logic. |
 | `MIN_CONFIDENCE` | no | Float threshold (default `0.6`) below which vision verdicts are ignored. |
 | `POINTS_PER_RUN` | no | Legacy gate value (default `10`). Under the plan-based model this no longer sets the per-workout points — it only ensures `running` is an awardable activity type; actual points come from `workout_points()` (see Section 5). |
-| `COACH_IDS` | no | Comma-separated Telegram user IDs (e.g. `123,456`) allowed to set/view OTHER users' plans. Blank/unset → empty set (no coaches; self-service still works for everyone). Whitespace/blank entries are ignored; non-integer entries are **skipped with a logged warning** (never a boot failure). Exposed via `Settings.coach_ids` and the `Settings.is_coach(user_id)` helper. |
+| `SEASON_START_DATE` | no | ISO date `YYYY-MM-DD` (default `2026-07-12`). Points and the leaderboard count **only** submissions dated **on or after** this date; earlier submissions are ignored so the season restarts everyone at zero without deleting registrations or coach-assigned plans (see Section 5). Parsed into `Settings.season_start_date` (a `datetime.date`); an invalid value fails fast at startup. |
+| `COACH_IDS` | no | Comma-separated Telegram user IDs (e.g. `123,456`) allowed to set up workouts/plans (run `/setplan`). Only coaches can set plans — regular users cannot set up their own workouts. Blank/unset → empty set (no coaches; nobody can set plans). Whitespace/blank entries are ignored; non-integer entries are **skipped with a logged warning** (never a boot failure). Exposed via `Settings.coach_ids` and the `Settings.is_coach(user_id)` helper. |
 | `LOG_LEVEL` | no | Logging verbosity (default `INFO`). |
 
 **Validation:** [`bot/config.py`](bot/config.py) fails fast at startup if any required variable is missing or malformed (e.g. `GOOGLE_SERVICE_ACCOUNT_JSON` not valid JSON, `TARGET_CHAT_ID` not an int).
@@ -556,8 +672,7 @@ Sam  - 20 points
 
 | Command | Description |
 |---------|-------------|
-| `/setplan N` | Set the caller's own weekly plan to `N` workouts/week (`N` in **2–6**, self-service). Upserts the user's `Plans` row (preserving streak) and replies with the per-workout point value (trimmed, e.g. plan 4 → `7.5`). Invalid/out-of-range/missing `N` → a short usage message. Works in groups; attributed to the poster. |
-| `/setplan @user N` | **Coach-only** (caller in `COACH_IDS`). Set another member's plan by `@username` (resolved via the `Plans` username directory or a `text_mention` entity) or by **replying** to their message + `/setplan N`. The plan is parsed from the **last** integer token so both `@user 4` and (reply) `4` work; validated to 2–6. On success replies naming who was set. Non-coaches targeting others get `Only a coach can set or view another member's plan.`; an unresolvable `@username` gets `Couldn't find @user. Ask them to post once (or use /whoami by replying to their message) so I can learn their ID.` |
+| `/setplan @user N` | **Coach-only** (caller in `COACH_IDS`). Set a member's weekly plan (`N` in **2–6**) by `@username` (resolved via the `Plans` username directory or a `text_mention` entity) or by **replying** to their message + `/setplan N`. The plan is parsed from the **last** integer token so both `@user 4` and (reply) `4` work; validated to 2–6. Upserts the target's `Plans` row (preserving streak) and replies naming who was set. **Regular users cannot set up their own workouts:** any non-coach caller is rejected early with `Only your coach can set up workouts for you.` An unresolvable `@username` gets `Couldn't find @user. Ask them to post once (or use /whoami by replying to their message) so I can learn their ID.` |
 | `/myplan` | Reply with the caller's own plan + streak (defaults to plan 3 / streak 0 if unset). |
 | `/myplan @user` | **Coach-only.** View another member's plan + streak by `@username` or by **replying** to their message. Shows defaults (plan 3 / streak 0) with a `(no plan set yet, using default 3)` note if they have no row. Same permission/not-found messages as coach `/setplan`. |
 | `/whoami` | Reply with the caller's Telegram id + name (id in `<code>` monospace for easy copy). Used as a **reply** to another user's message, reports THAT user's id + name instead — the primary way coaches discover member IDs (for `COACH_IDS` and username resolution). |
@@ -626,13 +741,15 @@ tzdata>=2024.1
 |------|----------|
 | **Duplicate submission** (same user + same image hash) | Rejected silently. Dedup lookup runs **before** the (costly) vision call; a second race-safe check runs before append. |
 | **Non-photo messages** | Ignored by handler filter (`filters.PHOTO`). |
-| **Photo but not Garmin / not running / planned only** | Vision verdict fails eligibility → silent ignore. |
+| **Photo but not Garmin/WHOOP / unsupported activity / planned only** | Vision verdict fails eligibility → silent ignore. |
+| **Garmin achievements/badges screen or WHOOP daily overview (Strain/Recovery/Sleep/Health Monitor/coach card)** | `is_achievement=true` → not eligible; the bot replies `⚠️ This looks like a summary/achievements screen, not a completed workout. Please send the workout summary screenshot from Garmin or WHOOP.` and awards nothing. |
+| **WHOOP workout with no distance/pace/map** | Normal for WHOOP — accepted on the `ACTIVITY STRAIN` + `DURATION H:MM:SS` + `ZONE n … BPM` markers; scored exactly like Garmin. |
 | **Workout older than current week** | Silent ignore (no log, no reply). |
 | **Low confidence** (`< MIN_CONFIDENCE`) | Treated as ignore. |
 | **Claude JSON parse failure** | Fallback substring extraction; if still invalid → ignore + warning log. |
 | **Claude API error / timeout / rate limit** | Optional single retry with backoff; on final failure → ignore + warning log. No user-facing error to avoid group spam. |
 | **Malformed / corrupt image bytes** | If download or base64 encoding fails → ignore + warning log. |
-| **Missing `workout_date`** | Not eligible → ignore. |
+| **Missing `workout_date`** (WHOOP shows only a time-of-day range) | The handler substitutes the **submission/message date** (message timestamp in `TIMEZONE`) before the eligibility gate, so the photo is still processed and no empty date is written. |
 | **Large integer IDs precision** | Written as text to the Sheet; read back and parsed as int. |
 | **Google Sheets write failure** | Log ERROR (visible in Railway logs); stay silent (no chat message). Retries with backoff run before final failure. |
 | **Google Sheets read failure during leaderboard** | Log error; post a graceful "leaderboard unavailable, will retry" message or skip; scheduler will fire again next period. |

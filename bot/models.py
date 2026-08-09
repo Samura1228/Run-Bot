@@ -18,6 +18,9 @@ ActivityType = Literal[
     "running", "cycling", "walking", "strength", "swimming", "other", "unknown"
 ]
 
+# Supported screenshot sources (tracker apps). ``None`` when unidentifiable.
+SourceApp = Literal["garmin", "whoop"]
+
 _ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 def _format_points_cell(p: float) -> str:
     """Serialize a point value for the sheet cell as a clean decimal string.
@@ -40,9 +43,27 @@ class VisionVerdict(BaseModel):
 
     model_config = {"extra": "forbid"}
 
+    # True when the screenshot comes from a SUPPORTED tracker app — Garmin
+    # Connect OR WHOOP. The historical name is kept (the field gates the whole
+    # pipeline); ``source`` says which app it actually was.
     is_garmin: bool
+    # "garmin" / "whoop" when identifiable, else None. Informational only: it
+    # never gates eligibility (both apps are treated identically for scoring),
+    # but it drives the WHOOP-specific duration/label normalization in
+    # ``bot.services.vision``.
+    source: Optional[SourceApp] = None
+    # The activity title exactly as rendered on screen (e.g. "WALKING",
+    # "STRENGTH TRAINER", "Бег"), used for the WHOOP label mapping. Optional.
+    activity_title: Optional[str] = None
     activity_type: ActivityType
     is_completed: bool
+    # True when the screenshot is a summary screen rather than one completed
+    # activity: a Garmin achievements/badges/awards screen (earned badges,
+    # personal records list, trophy/medal grid) OR a WHOOP daily overview
+    # (day Strain / Recovery / Sleep / Health Monitor / coach card). Such
+    # screens carry no single workout's metrics (duration/activity type) and
+    # MUST NOT be awarded points. Defaults to False for backward compatibility.
+    is_achievement: bool = False
     workout_date: Optional[str] = None
     distance: Optional[str] = None
     duration: Optional[str] = None
@@ -69,16 +90,28 @@ class VisionVerdict(BaseModel):
     def is_eligible(self, min_confidence: float) -> bool:
         """Return True if this verdict passes the shared gating pipeline.
 
-        Shared gating (per the blueprint) requires a completed Garmin activity
-        with a valid date and sufficient confidence. The activity_type is NOT
-        restricted here — the handler branches on activity_type after this gate
-        (running uses the plan-based model; walking/cycling/strength are flat
-        bonus activities with their own minimum-duration thresholds).
+        Shared gating (per the blueprint) requires a completed activity from a
+        supported app (Garmin Connect or WHOOP) with a valid date and
+        sufficient confidence. The activity_type is NOT restricted here — the
+        handler branches on activity_type after this gate (running uses the
+        plan-based model; walking/cycling/strength are flat bonus activities
+        with their own minimum-duration thresholds).
+
+        ``workout_date`` is expected to be non-null by this point: WHOOP
+        workout screens often show only a time-of-day range, so the handler
+        fills in the submission date as a fallback BEFORE calling this gate.
+
+        A summary screenshot (``is_achievement`` — Garmin achievements/badges
+        or a WHOOP daily overview) is explicitly NOT eligible — it is not a
+        completed-workout summary — but the handler detects that case
+        separately so it can reply with a helpful message instead of ignoring
+        silently.
         """
 
         return (
             self.is_garmin
             and self.is_completed
+            and not self.is_achievement
             and self.workout_date is not None
             and self.confidence >= min_confidence
         )

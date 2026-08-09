@@ -102,9 +102,20 @@ _PLAN_COL_UPDATED_AT = 4
 class SheetsService:
     """Encapsulates all Google Sheets access for the bot."""
 
-    def __init__(self, service_account_info: dict[str, Any], sheet_id: str) -> None:
+    def __init__(
+        self,
+        service_account_info: dict[str, Any],
+        sheet_id: str,
+        season_start_date: Optional[date] = None,
+    ) -> None:
         self._service_account_info = service_account_info
         self._sheet_id = sheet_id
+        # Season cutoff: submissions with a ``workout_date`` BEFORE this date are
+        # ignored by ALL points/leaderboard aggregation reads below, so a new
+        # season effectively starts everyone at zero WITHOUT deleting rows,
+        # registrations, or coach-assigned plans. ``None`` disables the cutoff
+        # (counts every row) — used only where a season is intentionally absent.
+        self._season_start_date = season_start_date
         self._client: Optional[gspread.Client] = None
         self._worksheet: Optional[gspread.Worksheet] = None
         self._plans_worksheet: Optional[gspread.Worksheet] = None
@@ -185,6 +196,19 @@ class SheetsService:
         worksheet = self._require_worksheet()
         return worksheet.get_all_values()
 
+    def _before_season(self, workout_date: date) -> bool:
+        """Return True if ``workout_date`` falls BEFORE the season start date.
+
+        When a season start date is configured, submissions dated before it are
+        excluded from ALL points/leaderboard aggregation (so the season restarts
+        everyone at zero without deleting rows or plans). When no season start
+        date is configured (``None``), nothing is excluded.
+        """
+
+        if self._season_start_date is None:
+            return False
+        return workout_date < self._season_start_date
+
     async def is_duplicate(self, user_id: int, image_hash: str) -> bool:
         """Return True if a row already exists for (user_id, image_hash).
 
@@ -228,6 +252,10 @@ class SheetsService:
                 wdate = date.fromisoformat(row[_COL_WORKOUT_DATE])
             except (ValueError, IndexError):
                 continue
+            # Season cutoff: ignore pre-season submissions entirely so points
+            # and the leaderboard reflect only the current season.
+            if self._before_season(wdate):
+                continue
             if not in_range(wdate, start_date, end_date):
                 continue
             try:
@@ -270,6 +298,10 @@ class SheetsService:
             try:
                 wdate = date.fromisoformat(row[_COL_WORKOUT_DATE])
             except (ValueError, IndexError):
+                continue
+            # Season cutoff: pre-season workouts do not count toward the
+            # per-workout points calculation or the weekly streak rollover.
+            if self._before_season(wdate):
                 continue
             if in_range(wdate, week_start, week_end):
                 count += 1

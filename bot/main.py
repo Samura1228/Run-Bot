@@ -56,6 +56,7 @@ def build_application(settings: Settings) -> Application:
     sheets = SheetsService(
         service_account_info=settings.google_service_account_info,
         sheet_id=settings.google_sheet_id,
+        season_start_date=settings.season_start_date,
     )
     vision = ClaudeVisionService(
         api_key=settings.anthropic_api_key,
@@ -113,8 +114,10 @@ def build_application(settings: Settings) -> Application:
         # autocomplete list). Default scope + default language is sufficient to
         # surface these in every chat (private + groups). Best-effort: if this
         # fails we log a WARNING and keep running — the bot must still start.
+        # Note: /setplan is intentionally NOT advertised in the public command
+        # menu — it is coach-only (regular users cannot set up their own
+        # workouts). The handler is still registered so coaches can use it.
         commands = [
-            BotCommand("setplan", "Set your weekly plan (2–6 workouts)"),
             BotCommand("myplan", "Show your plan and streak"),
             BotCommand("whoami", "Show your Telegram ID (or reply to someone)"),
             BotCommand("status", "Check bot health (Telegram/AI/Sheets)"),

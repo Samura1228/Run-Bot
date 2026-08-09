@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from datetime import date
 from functools import lru_cache
 from typing import Any, Optional
 
@@ -36,6 +37,13 @@ class Settings(BaseModel):
     min_confidence: float = Field(default=0.6, ge=0.0, le=1.0)
     points_per_run: int = Field(default=10, ge=0)
     log_level: str = Field(default="INFO")
+    # Season start date: points and the leaderboard count ONLY workout
+    # submissions whose ``workout_date`` is on or after this date. Submissions
+    # before it are ignored entirely (a fresh season "resets" everyone to zero
+    # without deleting registrations or coach-assigned plans). Sourced from the
+    # optional ``SEASON_START_DATE`` env var (``YYYY-MM-DD``); defaults to the
+    # 2026-07-12 season restart.
+    season_start_date: date = Field(default=date(2026, 7, 12))
     # Telegram user IDs allowed to set/view OTHER users' plans (coaches).
     # Sourced from the optional ``COACH_IDS`` env var (comma-separated). Empty
     # set means no coaches configured (self-service still works for everyone).
@@ -71,6 +79,27 @@ def _require(name: str) -> str:
     if value is None or value.strip() == "":
         raise ConfigError(f"Missing required environment variable: {name}")
     return value
+
+
+def _parse_season_start_date(raw: Optional[str]) -> Optional[date]:
+    """Parse the ``SEASON_START_DATE`` env var into a :class:`datetime.date`.
+
+    The value must be an ISO ``YYYY-MM-DD`` string (e.g. ``2026-07-12``). A
+    blank/unset value yields ``None`` so the :class:`Settings` default (the
+    2026-07-12 season restart) applies. An invalid value raises
+    :class:`ConfigError` so a typo fails fast at startup rather than silently
+    counting the wrong submissions.
+    """
+
+    if raw is None or raw.strip() == "":
+        return None
+    try:
+        return date.fromisoformat(raw.strip())
+    except ValueError as exc:
+        raise ConfigError(
+            "SEASON_START_DATE must be an ISO date (YYYY-MM-DD), "
+            f"got: {raw!r}"
+        ) from exc
 
 
 def _parse_coach_ids(raw: Optional[str]) -> set[int]:
@@ -176,6 +205,13 @@ def load_settings() -> Settings:
             raise ConfigError("POINTS_PER_RUN must be an integer") from exc
     if os.environ.get("LOG_LEVEL"):
         kwargs["log_level"] = os.environ["LOG_LEVEL"]
+    # SEASON_START_DATE is optional: blank/unset → the Settings default
+    # (2026-07-12) applies. An invalid value fails fast via ConfigError.
+    season_start_date = _parse_season_start_date(
+        os.environ.get("SEASON_START_DATE")
+    )
+    if season_start_date is not None:
+        kwargs["season_start_date"] = season_start_date
 
     try:
         return Settings(**kwargs)

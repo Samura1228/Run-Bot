@@ -40,10 +40,11 @@ from bot.utils.points import (
 logger = logging.getLogger(__name__)
 
 _SETPLAN_USAGE = (
-    f"Usage: /setplan [N]  or  /setplan @user N  (N {MIN_PLAN}–{MAX_PLAN}). "
-    "Coaches can target a user by @username or by replying to them."
+    f"Usage (coach only): /setplan @user N  or reply to a user + /setplan N "
+    f"(N {MIN_PLAN}–{MAX_PLAN})."
 )
 _COACH_ONLY_MSG = "Only a coach can set or view another member's plan."
+_SETPLAN_COACH_ONLY_MSG = "Only your coach can set up workouts for you."
 
 
 async def chatid_command(
@@ -303,16 +304,16 @@ async def whoami_command(
 async def setplan_command(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    """Set a weekly plan (workouts/week) via ``/setplan``.
+    """Set a weekly plan (workouts/week) via ``/setplan`` — COACHES ONLY.
 
-    Forms:
-      - ``/setplan N`` → set the caller's own plan (self-service).
-      - ``/setplan @username N`` (coach) → set that user's plan.
-      - reply to a user's message + ``/setplan N`` (coach) → set their plan.
+    Forms (coach only):
+      - ``/setplan @username N`` → set that user's plan.
+      - reply to a user's message + ``/setplan N`` → set their plan.
 
     The plan is parsed from the LAST integer token (so ``@user 4`` and (reply)
-    ``4`` both work) and validated to ``[MIN_PLAN, MAX_PLAN]`` (2–6). Targeting
-    another user requires the caller to be a coach; self-service is unchanged.
+    ``4`` both work) and validated to ``[MIN_PLAN, MAX_PLAN]`` (2–6). Only a
+    configured coach may set plans: regular users can no longer set up their
+    own workouts (self-service is disabled) and are told to ask their coach.
     On success the target's Plans row is upserted (preserving streak).
     """
 
@@ -342,6 +343,13 @@ async def setplan_command(
             await _safe_reply(
                 message, "❌ Could not set plan — internal error, see logs."
             )
+            return
+
+        # Coach-only guard: setting up workouts/plans is restricted to coaches.
+        # Regular users can no longer set up their own workouts — they must ask
+        # their coach. Reject non-coach callers early with a clear message.
+        if not settings.is_coach(caller.id):
+            await _safe_reply(message, _SETPLAN_COACH_ONLY_MSG)
             return
 
         args = context.args or []

@@ -4,9 +4,11 @@ A Python Telegram bot for running clubs. It passively watches a group chat and,
 whenever someone posts a **photo**, it:
 
 1. Downloads the image and hashes it (to prevent duplicate submissions).
-2. Sends it to **Claude vision** to check whether it's a **completed Garmin
-   Connect screenshot**, classify the **activity** (running / walking / cycling /
-   strength) and extract the workout date + duration.
+2. Sends it to **Claude vision** to check whether it's a **completed workout
+   screenshot from Garmin Connect or WHOOP** (see
+   [Supported screenshots](#supported-screenshots-garmin--whoop)), classify the
+   **activity** (running / walking / cycling / strength) and extract the workout
+   date + duration.
 3. If it's a valid activity **dated within the current Mon–Sun week** (Cyprus
    time), it awards points and logs to a **Google Sheet** (the row is written
    first), then replies in chat:
@@ -18,8 +20,10 @@ whenever someone posts a **photo**, it:
      minimum it replies with a short warning and awards nothing. These are
      **separate bonus points** — they don't affect the running plan or streak.
 
-   Otherwise (old week, duplicate, non-Garmin, not completed, unrecognized) it
-   silently ignores the photo.
+   Otherwise (old week, duplicate, unsupported app, not completed,
+   unrecognized) it silently ignores the photo. A **summary screen** (Garmin
+   achievements/badges or a WHOOP daily overview) gets a short warning reply and
+   no points.
 4. Automatically posts a **weekly leaderboard** every Monday at 09:00 and a
    **monthly leaderboard** on the 1st of each month at 09:00 (Europe/Nicosia).
    The weekly job also awards **streak bonuses** just before posting the board.
@@ -32,6 +36,7 @@ Google Sheets is the **single source of truth**, so restarts never lose data.
 
 ## Table of Contents
 
+0. [Supported screenshots (Garmin & WHOOP)](#supported-screenshots-garmin--whoop)
 1. [Prerequisites](#prerequisites)
 2. [Step 1 — Create the Telegram bot](#step-1--create-the-telegram-bot)
 3. [Step 2 — Get the group chat ID](#step-2--get-the-group-chat-id)
@@ -42,6 +47,69 @@ Google Sheets is the **single source of truth**, so restarts never lose data.
 8. [How the leaderboards work](#how-the-leaderboards-work)
 9. [Environment variables reference](#environment-variables-reference)
 10. [Troubleshooting](#troubleshooting)
+
+---
+
+## Supported screenshots (Garmin & WHOOP)
+
+The bot accepts workout screenshots from **two** apps, and they score
+**identically** — same plan-based running points, same flat bonuses, same
+minimum durations. There is no separate WHOOP scoring path.
+
+### Garmin Connect
+
+English **and** Russian UI activity-detail screens: an activity title + date/time,
+a route map with the low→high pace heat-map legend, and the stat grid
+(Distance/Расстояние, Avg Pace/Средний темп, Total Time/Общее время, HR,
+Calories). Nothing about this changed.
+
+### WHOOP
+
+WHOOP workout screens (English UI, dark theme) are recognized by:
+
+- an **ALL-CAPS activity title** at the top with a time range beneath it
+  (e.g. `WALKING` / `8:12 PM to 9:11 PM`, `STRENGTH TRAINER` / `11:08 to 12:03`);
+- the big blue **`ACTIVITY STRAIN`** number (and sometimes `ACTIVITY STEPS`);
+- the blue **heart-rate graph** with BPM gridlines;
+- the **`TYPICAL RANGE` … `DURATION H:MM:SS`** row;
+- the **`ZONE 5` … `ZONE 0`** heart-rate zone breakdown (BPM range, %, time).
+
+> WHOOP workout screens have **no distance, no pace and no GPS map** — that's
+> expected and never causes a rejection.
+
+**WHOOP activity names** are matched **case-insensitively** and mapped to the
+bot's activity types:
+
+| WHOOP title | Counts as |
+|---|---|
+| `RUNNING`, `RUN`, `TRAIL RUNNING`, `TREADMILL` | **running** (plan-based points) |
+| `WALKING`, `WALK`, `HIKING`, `HIKE` | **walking** (5 pts, ≥ 40 min) |
+| `CYCLING`, `BIKING`, `SPIN`, `SPINNING`, `INDOOR CYCLING` | **cycling** (5 pts, ≥ 60 min) |
+| `STRENGTH TRAINER`, `WEIGHTLIFTING`, `FUNCTIONAL FITNESS`, `CROSSFIT`, `HIIT`, `PILATES`, `YOGA`, `STRETCHING`, `MOBILITY` | **strength** (5 pts, ≥ 15 min) |
+| anything else (e.g. `SWIMMING`, `ROWING`) | *other* → not awardable |
+
+**Duration** comes from the **`DURATION H:MM:SS`** row (never the per-zone times
+and never the wall-clock range), with the seconds dropped: `0:59:20` → **59 min**,
+`0:55:59` → **55 min**, `1:40:24` → **100 min**.
+
+**No date on the screenshot?** WHOOP usually shows only a time-of-day range, so
+the bot falls back to the **date you posted the photo** (in `TIMEZONE`) instead
+of rejecting it.
+
+### WHOOP daily overview screens are NOT workouts
+
+Day-level WHOOP screens earn **no points**: daily/weekly **Strain**,
+**Recovery** (recovery %, HRV/RHR), **Sleep** (`SLEEP PERFORMANCE`, sleep
+stages), **Health Monitor**, and coach/insight summary cards — same as Garmin
+achievements/badges screens. The bot replies:
+
+```
+⚠️ This looks like a summary/achievements screen, not a completed workout. Please send the workout summary screenshot from Garmin or WHOOP.
+```
+
+The rule: a **single workout** screen has ONE activity title + `DURATION` + the
+zone breakdown; a **daily overview** shows day-level scores without a single
+activity's duration.
 
 ---
 
@@ -198,8 +266,8 @@ python -m bot.main
 ```
 
 You should see log lines like `Starting Run Bot ...`, `SheetsService
-initialized ...`, and `Bot started; scheduler running.` Post a Garmin running
-screenshot in the group to test — for a valid, current-week run a new row is
+initialized ...`, and `Bot started; scheduler running.` Post a Garmin or WHOOP
+running screenshot in the group to test — for a valid, current-week run a new row is
 written to the sheet first, an INFO log line `Logged workout: ...` appears in
 the Railway logs, and the bot then replies in chat with
 `✅ Nice run, {name}! +{points} points.`.
@@ -226,7 +294,8 @@ Run Bot uses **long-polling**, so it runs as a **worker** (no HTTP port).
    - `GOOGLE_SHEET_ID`
    - `TARGET_CHAT_ID` *(optional at first — boot the bot, run `/chatid` to
      discover it, then set it and redeploy)*
-   - `TIMEZONE`, `MIN_CONFIDENCE`, `POINTS_PER_RUN`, `LOG_LEVEL` *(optional)*
+   - `TIMEZONE`, `MIN_CONFIDENCE`, `POINTS_PER_RUN`, `SEASON_START_DATE`,
+     `LOG_LEVEL` *(optional)*
 4. Deploy. Watch the **Deploy Logs** — you should see the same startup lines as
    local. Because it's long-polling, the worker **stays alive** indefinitely.
 5. `restartPolicyType = "ON_FAILURE"` (in `railway.toml`) automatically restarts
@@ -252,6 +321,12 @@ Run Bot uses **long-polling**, so it runs as a **worker** (no HTTP port).
   high→low, with 🥇🥈🥉 medals for the top three (ranks 4+ have
   no medal). Users are labelled by full name, else `@username`, else
   `user <id>`. All participants with points are listed.
+- **Season start date:** points and the leaderboard count **only** workout
+  submissions dated **on or after** `SEASON_START_DATE` (default **2026-07-12**).
+  Submissions before that date are ignored entirely, so a new season effectively
+  restarts everyone at **zero** — user registrations and coach-assigned plans are
+  **not** affected. Old rows are left in the sheet (nothing is deleted); they
+  simply no longer count.
 - If nobody logged a run in the period, the bot still posts a friendly "no runs
   logged" message so the group knows it's alive.
 
@@ -280,8 +355,10 @@ Sam  - 20 points
 Instead of a flat points-per-run, each user has a weekly **plan** — how many
 workouts/week they aim for — and points scale to that plan.
 
-- **Set your plan:** `/setplan N` where `N` is between **2 and 6** (five plans:
-  2, 3, 4, 5, 6; default is **3** if you never set one). Example: `/setplan 4`.
+- **Your plan is set by your coach:** a coach (Telegram user ID in `COACH_IDS`)
+  sets each member's weekly plan `N` between **2 and 6** (five plans: 2, 3, 4,
+  5, 6; default is **3** if no plan is set). Regular users **cannot** set up
+  their own plan — ask your coach. Example (coach): `/setplan @jane 4`.
 - **Completing your plan earns exactly 30 points/week.** Each workout up to your
   plan is worth `30 / plan` points — an **exact fraction** (no rounding to whole
   numbers), shown trimmed (e.g. `7.5`, not `8`; `15`, not `15.0`):
@@ -325,15 +402,19 @@ streak, or overachievement (those stay running-only).
 - Below the minimum duration → **no points, not logged**; the bot just replies
   with the short warning above. If Claude can't read a duration for a bonus
   activity, it replies `⚠️ Couldn't read the duration — no points awarded.`
-- Same rules as running otherwise: it must be a **Garmin**, **completed**
-  activity dated in the **current week**, above the confidence threshold, and
-  not a duplicate — otherwise it's silently ignored.
+- Same rules as running otherwise: it must be a **Garmin or WHOOP**,
+  **completed** activity dated in the **current week**, above the confidence
+  threshold, and not a duplicate — otherwise it's silently ignored. A WHOOP
+  `WALKING 0:59:20` (59 min) or `STRENGTH TRAINER 0:55:59` (55 min) clears its
+  minimum and earns the usual +5.
 
-**Eligibility:** a photo is only awarded if Claude confirms it's a **Garmin**,
-**completed** activity of a supported type (**running**, **walking**,
+**Eligibility:** a photo is only awarded if Claude confirms it's a **Garmin or
+WHOOP**, **completed** activity of a supported type (**running**, **walking**,
 **cycling**, or **strength**) with a **valid date** in the **current week** and
-confidence ≥ `MIN_CONFIDENCE` (default **0.6**). Bonus activities additionally
-require their minimum duration. Everything else is silently ignored.
+confidence ≥ `MIN_CONFIDENCE` (default **0.6**). If the screenshot shows no date
+(typical for WHOOP), the **date you posted it** is used. Bonus activities
+additionally require their minimum duration. Everything else is silently
+ignored.
 
 ## Diagnostics
 
@@ -347,19 +428,15 @@ leak secrets — only a concise result is sent to chat.
 
 **Plan commands:**
 
-- **`/setplan N`** — set your weekly plan to `N` workouts/week (`N` between
-  **2** and **6**). Replies with the per-workout point value (trimmed, e.g. plan
-  4 → `7.5`); invalid or out-of-range input returns a short usage message.
-  Attributed to whoever sends it, so it works in the group.
 - **`/myplan`** — replies with your current plan and streak (defaults to plan 3,
-  streak 0 if you've never set one).
+  streak 0 if a coach hasn't set one for you).
 
-**Coach commands (targeting other members):**
+**Coach commands (setting up workouts — COACHES ONLY):**
 
-Coaches (Telegram user IDs listed in `COACH_IDS`) can set or view **other**
-members' plans. Everyone else can only manage their **own** plan (self-service,
-unchanged). If a non-coach tries to target someone else, the bot replies
-`Only a coach can set or view another member's plan.` and does nothing.
+Setting up workouts/plans is restricted to **coaches** (Telegram user IDs
+listed in `COACH_IDS`). Regular users **cannot** set up their own workouts: if a
+non-coach runs `/setplan`, the bot replies `Only your coach can set up workouts
+for you.` and does nothing. Coaches can set or view **other** members' plans.
 
 - **`/setplan @username N`** *(coach)* — set another member's plan. The plan is
   parsed from the last integer, so `/setplan @jane 4` works.
@@ -426,7 +503,8 @@ unchanged). If a non-coach tries to target someone else, the bot replies
 | `TIMEZONE` | ❌ | `Europe/Nicosia` | IANA timezone for scheduling & dates. |
 | `MIN_CONFIDENCE` | ❌ | `0.6` | Min vision confidence to accept a verdict. |
 | `POINTS_PER_RUN` | ❌ | `10` | Legacy setting. Under the plan-based model it no longer sets per-run points — it only marks `running` as awardable. Actual points come from each user's plan (set with `/setplan`). |
-| `COACH_IDS` | ❌ | *(empty)* | Comma-separated Telegram user IDs (e.g. `123,456`) allowed to set/view OTHER users' plans. Blank/unset → no coaches. Non-integer entries are skipped with a warning. Use `/whoami` (reply to a member) to find IDs. |
+| `SEASON_START_DATE` | ❌ | `2026-07-12` | ISO date (`YYYY-MM-DD`). Points and the leaderboard count only submissions dated on or after this date; earlier submissions are ignored so the season restarts everyone at zero without deleting registrations or coach-assigned plans. |
+| `COACH_IDS` | ❌ | *(empty)* | Comma-separated Telegram user IDs (e.g. `123,456`) allowed to set up workouts/plans. Only coaches can run `/setplan`; regular users cannot set up their own workouts. Blank/unset → no coaches (nobody can set plans). Non-integer entries are skipped with a warning. Use `/whoami` (reply to a member) to find IDs. |
 | `LOG_LEVEL` | ❌ | `INFO` | `DEBUG`/`INFO`/`WARNING`/`ERROR`. |
 
 See [`.env.example`](.env.example) for a copy-paste template.

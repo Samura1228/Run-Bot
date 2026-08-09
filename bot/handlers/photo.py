@@ -3,6 +3,11 @@
 Orchestrates the full pipeline for photo messages:
 download → hash → dedup → vision → decision → silent log.
 
+Screenshots from BOTH supported apps — Garmin Connect and WHOOP — flow through
+this single pipeline and score identically. WHOOP workout screens often show
+only a time-of-day range with no date, so a missing ``workout_date`` falls back
+to the submission (message) date instead of being rejected.
+
 On a successful, eligible current-week run the row is written to the Google
 Sheet FIRST; once the write is confirmed and the INFO log is emitted, the bot
 replies to the chat with "✅ Nice run, {name}! +{points} points.". All
@@ -14,6 +19,7 @@ from __future__ import annotations
 
 import logging
 from datetime import date
+from zoneinfo import ZoneInfo
 
 from telegram import Update
 from telegram.error import TelegramError
@@ -24,7 +30,7 @@ from bot.models import WorkoutLogRow
 from bot.services.leaderboard import LeaderboardService  # noqa: F401 (type hints)
 from bot.services.sheets import SheetsService
 from bot.services.vision import ClaudeVisionService
-from bot.utils.dates import current_week_bounds, in_range
+from bot.utils.dates import current_week_bounds, in_range, today_in
 from bot.utils.hashing import compute_image_hash
 from bot.utils.points import (
     ACTIVITY_MIN_MINUTES,
@@ -60,6 +66,20 @@ class PhotoHandler:
         self._vision = vision
         self._sheets = sheets
         self._activity_points = activity_points
+
+    def _submission_date(self, message) -> date:
+        """Return the message's calendar date in the configured timezone.
+
+        Used as the workout-date fallback when the screenshot shows no date at
+        all (typical for WHOOP workout screens, which only show a time-of-day
+        range). Falls back to "today" if the message carries no timestamp.
+        """
+
+        tz = ZoneInfo(self._settings.timezone)
+        sent_at = getattr(message, "date", None)
+        if sent_at is None:
+            return today_in(self._settings.timezone)
+        return sent_at.astimezone(tz).date()
 
     async def __call__(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -111,12 +131,56 @@ class PhotoHandler:
             # Parse/API/validation failure → silent ignore.
             return
 
-        # 5) Eligibility.
+        # 5a) Reject summary screens explicitly (not a completed-workout
+        # summary): Garmin achievements/badges/personal-records screens AND
+        # WHOOP daily overviews (day Strain / Recovery / Sleep / Health
+        # Monitor / coach cards). Unlike other non-eligible verdicts, this one
+        # gets a clear user-facing reply so the poster knows to send the
+        # workout summary instead — and NO points are awarded / row written.
+        if verdict.is_achievement:
+            logger.info(
+                "Summary/achievements screenshot from user %s (source=%s); "
+                "not a workout — no points awarded.",
+                user.id,
+                verdict.source,
+            )
+            try:
+                await message.reply_text(
+                    "⚠️ This looks like a summary/achievements screen, not a "
+                    "completed workout. Please send the workout summary "
+                    "screenshot from Garmin or WHOOP."
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.error("Failed to send summary-screen reply: %s", exc)
+            return
+
+        # 5a-bis) Missing date → fall back to the submission date. WHOOP workout
+        # screens usually show only a time-of-day range (e.g. "8:12 PM to
+        # 9:11 PM") and no date at all, so rejecting a dateless screenshot
+        # would drop valid workouts. The message's own timestamp (converted to
+        # the configured timezone) is the workout day in practice, since people
+        # post right after training. Garmin screenshots keep whatever date the
+        # model read; this only applies when NO date was visible.
+        if verdict.workout_date is None:
+            fallback = self._submission_date(message)
+            logger.info(
+                "No date on screenshot from user %s (source=%s); falling back "
+                "to the submission date %s.",
+                user.id,
+                verdict.source,
+                fallback,
+            )
+            verdict = verdict.model_copy(
+                update={"workout_date": fallback.isoformat()}
+            )
+
+        # 5b) Eligibility.
         if not verdict.is_eligible(self._settings.min_confidence):
             logger.info(
-                "Verdict not eligible (garmin=%s type=%s completed=%s "
-                "date=%s conf=%.2f); ignoring.",
+                "Verdict not eligible (supported=%s source=%s type=%s "
+                "completed=%s date=%s conf=%.2f); ignoring.",
                 verdict.is_garmin,
+                verdict.source,
                 verdict.activity_type,
                 verdict.is_completed,
                 verdict.workout_date,
@@ -298,8 +362,9 @@ class PhotoHandler:
 
         # 9) Success: INFO log first, then a chat reply confirming the activity.
         logger.info(
-            "Logged workout: user=%s date=%s activity=%s points=%s",
+            "Logged workout: user=%s source=%s date=%s activity=%s points=%s",
             user.id,
+            verdict.source,
             verdict.workout_date,
             activity,
             points,
