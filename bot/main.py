@@ -23,6 +23,7 @@ from bot.config import ConfigError, Settings, get_settings
 from bot.handlers.commands import (
     chatid_command,
     myplan_command,
+    pairs_command,
     setplan_command,
     status_command,
     testsheet_command,
@@ -85,6 +86,7 @@ def build_application(settings: Settings) -> Application:
     application.add_handler(CommandHandler("whoami", whoami_command))
     application.add_handler(CommandHandler("setplan", setplan_command))
     application.add_handler(CommandHandler("myplan", myplan_command))
+    application.add_handler(CommandHandler("pairs", pairs_command))
 
     # Register a global error handler so exceptions in the update loop are
     # logged cleanly (and Conflict is special-cased) instead of bubbling up.
@@ -106,6 +108,7 @@ def build_application(settings: Settings) -> Application:
             sheets=sheets,
             target_chat_id=settings.target_chat_id,
             tz=settings.timezone,
+            pairs=settings.pairs,
         )
         scheduler.start()
         app.bot_data["scheduler"] = scheduler
@@ -114,9 +117,10 @@ def build_application(settings: Settings) -> Application:
         # autocomplete list). Default scope + default language is sufficient to
         # surface these in every chat (private + groups). Best-effort: if this
         # fails we log a WARNING and keep running — the bot must still start.
-        # Note: /setplan is intentionally NOT advertised in the public command
-        # menu — it is coach-only (regular users cannot set up their own
-        # workouts). The handler is still registered so coaches can use it.
+        # Note: /setplan and /pairs are intentionally NOT advertised in the
+        # public command menu — they are coach-only (regular users cannot set
+        # up their own workouts). Their handlers are still registered so
+        # coaches can use them.
         commands = [
             BotCommand("myplan", "Show your plan and streak"),
             BotCommand("whoami", "Show your Telegram ID (or reply to someone)"),

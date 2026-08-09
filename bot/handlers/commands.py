@@ -7,6 +7,7 @@ Contains simple slash-command handlers:
 - ``/testsheet`` — verifies Google Sheets connectivity and Editor access.
 - ``/status`` — a consolidated health report across Telegram, Anthropic, and
   Google Sheets, plus the configured target chat and timezone.
+- ``/pairs`` — coach-only, posts the current week's pairs leaderboard on demand.
 
 The commands work in any chat type (private, group, supergroup, channel) and,
 like the rest of the codebase, never crash on failure — errors are logged and
@@ -27,7 +28,9 @@ from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
 from bot.config import Settings
+from bot.services.leaderboard import LeaderboardService
 from bot.services.sheets import SheetsService, check_sheets
+from bot.utils.dates import current_week_bounds
 from bot.utils.points import (
     DEFAULT_PLAN,
     MAX_PLAN,
@@ -45,6 +48,7 @@ _SETPLAN_USAGE = (
 )
 _COACH_ONLY_MSG = "Only a coach can set or view another member's plan."
 _SETPLAN_COACH_ONLY_MSG = "Only your coach can set up workouts for you."
+_PAIRS_COACH_ONLY_MSG = "Only a coach can view the pairs leaderboard."
 
 
 async def chatid_command(
@@ -106,6 +110,18 @@ def _get_sheets(context: ContextTypes.DEFAULT_TYPE) -> Optional[SheetsService]:
     if isinstance(sheets, SheetsService):
         return sheets
     logger.error("SheetsService not found in bot_data; plan commands unavailable.")
+    return None
+
+
+def _get_leaderboard(
+    context: ContextTypes.DEFAULT_TYPE,
+) -> Optional[LeaderboardService]:
+    """Return the shared :class:`LeaderboardService` stashed in ``bot_data``."""
+
+    leaderboard = context.application.bot_data.get("leaderboard")
+    if isinstance(leaderboard, LeaderboardService):
+        return leaderboard
+    logger.error("LeaderboardService not found in bot_data; /pairs unavailable.")
     return None
 
 
@@ -464,6 +480,63 @@ async def myplan_command(
             f"{who} — plan: {plan} workouts/week · streak: {streak} weeks.{note}",
         )
 
+async def pairs_command(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Reply with the CURRENT week's pairs leaderboard — COACHES ONLY.
+
+    Uses the same coach guard as ``/setplan`` (:meth:`Settings.is_coach`) and
+    the same aggregation/formatting as the scheduled Monday 09:00 pairs board,
+    but over the CURRENT (in-progress) Mon–Sun week so a coach can check
+    standings on demand. Intentionally NOT advertised in the public command
+    menu (like ``/setplan``).
+    """
+
+    message = update.effective_message
+    if message is None:
+        return
+
+    try:
+        caller = message.from_user
+        if caller is None:
+            return
+
+        settings = _get_settings(context)
+        if settings is None:
+            await _safe_reply(
+                message, "❌ Could not build the pairs board — internal error."
+            )
+            return
+
+        if not settings.is_coach(caller.id):
+            await _safe_reply(message, _PAIRS_COACH_ONLY_MSG)
+            return
+
+        if not settings.pairs:
+            await _safe_reply(
+                message, "No pairs configured (the PAIRS setting is empty)."
+            )
+            return
+
+        leaderboard = _get_leaderboard(context)
+        if leaderboard is None:
+            await _safe_reply(
+                message, "❌ Could not build the pairs board — internal error."
+            )
+            return
+
+        start_date, end_date = current_week_bounds(settings.timezone)
+        entries = await leaderboard.aggregate_pairs(
+            settings.pairs, start_date, end_date
+        )
+        await _safe_reply(
+            message, leaderboard.format_pairs(entries, start_date, end_date)
+        )
+    except Exception as exc:  # noqa: BLE001 - defensive: never fail silently
+        logger.error("Unexpected error handling /pairs: %s", exc, exc_info=exc)
+        await _safe_reply(
+            message, "⚠️ Something went wrong building the pairs board. Try again."
+        )
 
 async def _safe_reply(message, text: str) -> None:
     """Send a plain-text reply, swallowing/ logging any Telegram failure."""

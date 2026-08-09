@@ -1,15 +1,16 @@
 """Scheduler service.
 
 Configures an :class:`~apscheduler.schedulers.asyncio.AsyncIOScheduler` with
-cron jobs for the weekly (Mon 09:00) and monthly (1st 09:00) leaderboards. The
-scheduler must be started on the same asyncio loop as python-telegram-bot (via
-a PTB post-init hook).
+cron jobs for the weekly **pairs** board (Mon 09:00), the weekly individual
+leaderboard (Mon 09:05) and the monthly leaderboard (1st 09:00). The scheduler
+must be started on the same asyncio loop as python-telegram-bot (via a PTB
+post-init hook).
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import Optional, Sequence
 from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -202,6 +203,63 @@ async def run_weekly_leaderboard(
         logger.error("Failed to send weekly leaderboard: %s", exc)
 
 
+async def run_weekly_pairs_leaderboard(
+    bot: Bot,
+    leaderboard: LeaderboardService,
+    sheets: SheetsService,
+    pairs: Sequence[tuple[int, int]],
+    target_chat_id: int,
+    tz: str,
+) -> None:
+    """Award streak bonuses, then post the previous week's PAIRS leaderboard.
+
+    Covers the SAME just-finished Mon–Sun window as
+    :func:`run_weekly_leaderboard` (via :func:`previous_week_bounds`) and reuses
+    the individual board's aggregation, so scoring stays identical.
+
+    Ordering vs. streak bonuses: the rollover writes ``streak_bonus`` rows dated
+    the PREVIOUS Sunday, i.e. inside the week being reported. It runs at the
+    start of :func:`run_weekly_leaderboard`, which is now scheduled for Mon
+    **09:05** — AFTER this 09:00 pairs job. So this job runs the rollover itself
+    first; it is idempotent (``has_streak_bonus_for_date`` guards against
+    double-awarding), so whichever job runs first records the bonuses and the
+    other sees them already present and skips. Pair totals therefore always
+    include that week's streak bonuses.
+
+    A failure here is logged and swallowed so it can never prevent the
+    individual weekly board (registered as a separate job) from posting.
+    """
+
+    if not pairs:
+        logger.info("PAIRS is empty — skipping the weekly pairs leaderboard.")
+        return
+
+    # Record streak bonuses first so they're included in the aggregation below
+    # (idempotent — a no-op if the 09:05 job already recorded them).
+    try:
+        await evaluate_weekly_streaks(sheets, tz)
+    except Exception as exc:
+        logger.error(
+            "Streak rollover raised; continuing to pairs leaderboard: %s", exc
+        )
+
+    start_date, end_date = previous_week_bounds(tz)
+    try:
+        entries = await leaderboard.aggregate_pairs(pairs, start_date, end_date)
+        message = leaderboard.format_pairs(entries, start_date, end_date)
+    except Exception as exc:
+        logger.error("Failed to build weekly pairs leaderboard: %s", exc)
+        return
+
+    try:
+        await bot.send_message(chat_id=target_chat_id, text=message)
+        logger.info(
+            "Posted weekly pairs leaderboard for %s–%s.", start_date, end_date
+        )
+    except TelegramError as exc:
+        logger.error("Failed to send weekly pairs leaderboard: %s", exc)
+
+
 async def run_monthly_leaderboard(
     bot: Bot,
     leaderboard: LeaderboardService,
@@ -231,6 +289,7 @@ def build_scheduler(
     sheets: SheetsService,
     target_chat_id: Optional[int],
     tz: str,
+    pairs: Optional[Sequence[tuple[int, int]]] = None,
 ) -> AsyncIOScheduler:
     """Build (but do not start) the AsyncIOScheduler with cron jobs.
 
@@ -241,6 +300,8 @@ def build_scheduler(
         target_chat_id: Chat to post leaderboards to. If ``None``, the
             leaderboard jobs are not registered (see warning below).
         tz: IANA timezone name (e.g. ``Europe/Nicosia``).
+        pairs: Configured competition pairs for the weekly pairs board. Empty
+            or ``None`` → the pairs job is not registered.
 
     Returns:
         A configured, not-yet-started scheduler.
@@ -259,9 +320,26 @@ def build_scheduler(
         )
         return scheduler
 
+    # Pairs board first (Mon 09:00), then the individual board (Mon 09:05).
+    # Each job is registered independently and swallows its own errors, so a
+    # failure in one can never stop the other from posting.
+    if pairs:
+        scheduler.add_job(
+            run_weekly_pairs_leaderboard,
+            CronTrigger(day_of_week="mon", hour=9, minute=0, timezone=zone),
+            args=[bot, leaderboard, sheets, list(pairs), target_chat_id, tz],
+            id="weekly_pairs_leaderboard",
+            misfire_grace_time=3600,
+            coalesce=True,
+            replace_existing=True,
+        )
+    else:
+        logger.info(
+            "PAIRS is empty — the weekly pairs leaderboard job is not registered."
+        )
     scheduler.add_job(
         run_weekly_leaderboard,
-        CronTrigger(day_of_week="mon", hour=9, minute=0, timezone=zone),
+        CronTrigger(day_of_week="mon", hour=9, minute=5, timezone=zone),
         args=[bot, leaderboard, sheets, target_chat_id, tz],
         id="weekly_leaderboard",
         misfire_grace_time=3600,
@@ -279,7 +357,9 @@ def build_scheduler(
     )
 
     logger.info(
-        "Scheduler configured: weekly (Mon 09:00) & monthly (1st 09:00) in %s.",
+        "Scheduler configured: pairs (Mon 09:00, %d pairs), weekly (Mon 09:05) "
+        "& monthly (1st 09:00) in %s.",
+        len(pairs or []),
         tz,
     )
     return scheduler

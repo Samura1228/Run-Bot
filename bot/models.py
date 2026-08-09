@@ -3,6 +3,8 @@
 - :class:`VisionVerdict` — the strict JSON schema Claude must return.
 - :class:`WorkoutLogRow` — a single confirmed & awarded workout row.
 - :class:`LeaderboardEntry` — an aggregated per-user leaderboard entry.
+- :class:`PairEntry` — an aggregated per-PAIR leaderboard entry (combined
+  points of two configured members).
 """
 
 from __future__ import annotations
@@ -182,3 +184,24 @@ class LeaderboardEntry(BaseModel):
         if self.telegram_username.strip():
             return f"@{self.telegram_username.strip()}"
         return f"user {self.telegram_user_id}"
+
+
+class PairEntry(BaseModel):
+    """An aggregated entry for one configured PAIR over a date range.
+
+    ``points`` is the SUM of both members' points for the range (a member with
+    no rows contributes 0). ``member_labels`` preserves the configured
+    Member A → Member B order and holds each member's already-resolved display
+    label, so :meth:`label` never has to touch the sheet. It exposes the same
+    ``label()`` / ``points`` surface as :class:`LeaderboardEntry` so the shared
+    leaderboard renderer (including the "1224" tie ranking) works unchanged.
+    """
+
+    member_ids: tuple[int, int]
+    member_labels: tuple[str, str]
+    points: float
+
+    def label(self) -> str:
+        """Return ``"Member A ; Member B"`` in the configured member order."""
+
+        return " ; ".join(self.member_labels)

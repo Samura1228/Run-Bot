@@ -24,9 +24,10 @@ whenever someone posts a **photo**, it:
    unrecognized) it silently ignores the photo. A **summary screen** (Garmin
    achievements/badges or a WHOOP daily overview) gets a short warning reply and
    no points.
-4. Automatically posts a **weekly leaderboard** every Monday at 09:00 and a
-   **monthly leaderboard** on the 1st of each month at 09:00 (Europe/Nicosia).
-   The weekly job also awards **streak bonuses** just before posting the board.
+4. Automatically posts a **weekly pairs leaderboard** every Monday at 09:00, the
+   **weekly individual leaderboard** every Monday at 09:05, and a **monthly
+   leaderboard** on the 1st of each month at 09:00 (Europe/Nicosia). Both weekly
+   jobs award **streak bonuses** first (idempotently) so they are included.
 
 Google Sheets is the **single source of truth**, so restarts never lose data.
 
@@ -312,9 +313,12 @@ Run Bot uses **long-polling**, so it runs as a **worker** (no HTTP port).
 ## How the leaderboards work
 
 - Times are in **Europe/Nicosia** (Cyprus). Change with `TIMEZONE` if needed.
-- **Weekly (Mon 09:00):** first awards **streak bonuses** for the previous week
-  (so they show up in the board), then posts totals for the **previous**
-  Monday–Sunday week.
+- **Weekly pairs (Mon 09:00):** posts the **pairs** board — each configured pair's
+  **combined** points for the **previous** Monday–Sunday week (see
+  [Pairs leaderboard](#pairs-leaderboard) below).
+- **Weekly individual (Mon 09:05):** first awards **streak bonuses** for the
+  previous week (so they show up in the board), then posts individual totals for
+  the **previous** Monday–Sunday week.
 - **Monthly (1st 09:00):** posts totals for the **previous** full calendar month.
 - Rankings sum each user's points over the range (**including** the
   walking/cycling/strength bonus points and `streak_bonus` points), sorted
@@ -348,6 +352,49 @@ Jane Runner  - 120 points 🥇
 @speedy  - 90 points 🥈
 Alex  - 40 points 🥉
 Sam  - 20 points
+```
+
+### Pairs leaderboard
+
+The coach pairs up chat members; each pair competes on their **combined** weekly
+points. The board is posted automatically every **Monday at 09:00** (five
+minutes before the individual board) and can be requested on demand by a coach
+with **`/pairs`** (which shows the **current**, in-progress week).
+
+- **Configured via the `PAIRS` env var.** Pairs are separated by `,`, and the two
+  Telegram user IDs within a pair are joined by `+`:
+
+  ```
+  PAIRS=5025515480+572559211,6599040404+6108222286,1406051646+6572975237,1274840834+871410038
+  ```
+
+  Unset → the coach's default pairs (the four above) apply. Set to an **empty**
+  value (`PAIRS=`) to **disable** the pairs board entirely (nothing is posted;
+  the job isn't even registered). A **malformed** entry — anything that isn't
+  exactly two `+`-separated integers — **fails fast** at startup with a clear
+  `ConfigError`, exactly like a bad `SEASON_START_DATE`.
+- **Scoring reuses the individual board's aggregation** — the same Mon–Sun window,
+  the same `SEASON_START_DATE` cutoff, and the same **already-stored** point
+  values. There are **no pair multipliers**: running still yields more than the
+  flat 5 for walking/cycling/strength, and `streak_bonus` rows count as normal
+  points. A pair's total is simply the **sum of both members'** points; a member
+  with no workouts that week contributes **0** (the pair is never skipped).
+- **Members render in the configured order**, `Member A ; Member B`, using the
+  same labels as the individual board (full name, else `@username`, else
+  `user <id>`) — so a member without a Telegram username still shows by name.
+- **Sorted by combined points high→low**, with 🥇🥈🥉 and the same **"1224"
+  standard competition ranking**: tied pairs share a rank/medal and the next
+  rank is skipped.
+
+Example output:
+
+```
+Weekly pairs leaders board 🏆
+
+ArtLike_ ; MY  - 140 points 🥇
+. ; Anastasia S  - 115 points 🥈
+Матвѣй ; Marfa Sh  - 110 points 🥉
+AB ; Elena  - 70 points
 ```
 
 ## Points & plans
@@ -485,6 +532,11 @@ for you.` and does nothing. Coaches can set or view **other** members' plans.
 - **`/whoami`** — replies with your (or, when used as a reply, the replied-to
   user's) Telegram id and name, so coaches can discover member IDs for
   `COACH_IDS` and for username resolution.
+- **`/pairs`** — **coach-only** (same `COACH_IDS` check as `/setplan`): replies
+  with the **current** week's pairs leaderboard on demand, using the same
+  formatting as the scheduled Monday 09:00 board. Non-coaches get a short
+  "coach only" message. Like `/setplan`, it is intentionally **not** advertised
+  in the public command menu.
 
 ---
 ---
@@ -505,6 +557,7 @@ for you.` and does nothing. Coaches can set or view **other** members' plans.
 | `POINTS_PER_RUN` | ❌ | `10` | Legacy setting. Under the plan-based model it no longer sets per-run points — it only marks `running` as awardable. Actual points come from each user's plan (set with `/setplan`). |
 | `SEASON_START_DATE` | ❌ | `2026-07-12` | ISO date (`YYYY-MM-DD`). Points and the leaderboard count only submissions dated on or after this date; earlier submissions are ignored so the season restarts everyone at zero without deleting registrations or coach-assigned plans. |
 | `COACH_IDS` | ❌ | *(empty)* | Comma-separated Telegram user IDs (e.g. `123,456`) allowed to set up workouts/plans. Only coaches can run `/setplan`; regular users cannot set up their own workouts. Blank/unset → no coaches (nobody can set plans). Non-integer entries are skipped with a warning. Use `/whoami` (reply to a member) to find IDs. |
+| `PAIRS` | ❌ | *(the coach's 4 default pairs)* | Competition pairs for the weekly **pairs** leaderboard. Pairs separated by `,`, the two Telegram user IDs within a pair joined by `+` — e.g. `123+456,789+1011`. Unset → the built-in default pairs. Set to an **empty** value (`PAIRS=`) to **disable** the pairs board (job not registered, nothing posted). A **malformed** entry (not exactly two `+`-separated integers) **fails fast** at startup with a `ConfigError`. See [Pairs leaderboard](#pairs-leaderboard). |
 | `LOG_LEVEL` | ❌ | `INFO` | `DEBUG`/`INFO`/`WARNING`/`ERROR`. |
 
 See [`.env.example`](.env.example) for a copy-paste template.
