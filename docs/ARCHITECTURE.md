@@ -16,7 +16,7 @@
 1. Joins a Telegram group and passively listens to all messages.
 2. On any **photo** message, downloads the image, hashes the raw bytes (dedup), and sends it to **Claude vision**.
 3. Claude returns a **strict JSON verdict** (is it a supported — Garmin **or** WHOOP — workout screenshot, completed, with a workout date, etc.).
-4. The bot applies **points/date-window logic**: if the workout date falls in the **current Mon–Sun week** (Europe/Nicosia) → award points and log to Google Sheets (row written first, then an INFO log line), then reply in chat. **Running** uses the user's **weekly plan** (see Section 5) and replies `✅ Nice run, {name}! +{points} points.`. **Walking/cycling/strength** award a flat **5 points** once their minimum duration is met and reply `✅ Nice {walk|ride|strength session}, {name}! +5 points.`; below their minimum duration the bot replies with a short warning and awards nothing. Anything else (old-week, duplicate, non-Garmin, not completed, `other`) → silently ignored.
+4. The bot applies **points/date-window logic**: if the workout date falls in the **accepted window** — the **current Mon–Sun week** (Europe/Nicosia), extended over the **just-finished** week while it is Monday before the `LATE_SUBMISSION_GRACE_UNTIL_HOUR` cutoff (default **09:00**, i.e. before the weekly boards post) → award points and log to Google Sheets (row written first, then an INFO log line), then reply in chat. A late-but-accepted row keeps its **real `workout_date`**, so it counts toward the week being reported. **Running** uses the user's **weekly plan** (see Section 5) and replies `✅ Nice run, {name}! +{points} points.`. **Walking/cycling/strength** award a flat **5 points** once their minimum duration is met and reply `✅ Nice {walk|ride|strength session}, {name}! +5 points.`; below their minimum duration the bot replies with a short warning and awards nothing. Anything else (outside the accepted window, non-Garmin, not completed, `other`) awards nothing but **still gets an explanatory reply** — submissions are **never silently dropped**; only a **duplicate** stays silent.
 5. An **APScheduler** (AsyncIOScheduler, timezone `Europe/Nicosia`) runs on the same event loop and posts a **weekly pairs leaderboard** (Monday 09:00), a **weekly individual leaderboard** (Monday 09:05) and a **monthly leaderboard** (1st of month 09:00). Both weekly jobs perform the (idempotent) **streak rollover** first, so streak bonuses are included in whichever board posts first.
 6. **Google Sheets is the single source of truth.** Leaderboards are computed by reading and aggregating the sheet, so restarts lose no data.
 
@@ -32,8 +32,8 @@ flowchart TD
     DEDUP -->|duplicate| IGN1[Silently ignore]
     DEDUP -->|new| VIS[Claude Vision Service]
     VIS --> VER[Parse & validate JSON verdict]
-    VER --> DEC{Decision:<br/>Garmin + running +<br/>completed + in current week?}
-    DEC -->|no / low confidence / parse fail| IGN2[Silently ignore]
+    VER --> DEC{Decision:<br/>Garmin + running +<br/>completed + in accepted window?<br/>(current week, or previous week<br/>on Mon before 09:00)}
+    DEC -->|no / low confidence / parse fail| IGN2[No points +<br/>explanatory reply]
     DEC -->|yes| AWARD[Award plan-based points]
     AWARD --> SHEET[(Google Sheet<br/>source of truth)]
     AWARD --> LOG[INFO log + chat reply<br/>after Sheet write]
@@ -108,7 +108,7 @@ run-bot/
 | [`bot/services/sheets.py`](bot/services/sheets.py) | All Google Sheets I/O: dedup lookup, append row, read range for aggregation. |
 | [`bot/services/scheduler.py`](bot/services/scheduler.py) | Configure & start `AsyncIOScheduler` cron triggers on the PTB loop. |
 | [`bot/services/leaderboard.py`](bot/services/leaderboard.py) | Aggregate points per user for a date range; format weekly/monthly messages. |
-| [`bot/utils/dates.py`](bot/utils/dates.py) | Compute current/previous Mon–Sun week and previous calendar month in Europe/Nicosia. |
+| [`bot/utils/dates.py`](bot/utils/dates.py) | Compute current/previous Mon–Sun week and previous calendar month in Europe/Nicosia, plus the accepted-submission window (`accepted_workout_window()`) and the week containing a given date (`week_bounds_containing()`). |
 | [`bot/utils/hashing.py`](bot/utils/hashing.py) | Deterministic image byte hashing for dedup. |
 | [`bot/utils/points.py`](bot/utils/points.py) | Plan-based points model: constants, `workout_points()` (base + overachievement) and `streak_bonus()`; the `ACTIVITY_POINTS` mapping now only gates awardable activity types (running). |
 
@@ -374,7 +374,7 @@ type — the handler branches on `activity_type` after this gate:
 - `activity_type == "running"` → plan-based points (Section 5).
 - `activity_type in {"walking", "cycling", "strength"}` → flat 5-point bonus,
   subject to the per-activity minimum duration (Section 5).
-- anything else (`other`/legacy) → silently IGNORE.
+- anything else (`other`/legacy) → **no points**, and the bot replies `⚠️ This activity type doesn't earn points. Points are awarded for running, walking, cycling and strength workouts.`
 
 If gated-in, proceed to the date-window/points decision (Section 5). Otherwise IGNORE.
 
@@ -391,6 +391,27 @@ If gated-in, proceed to the date-window/points decision (Section 5). Otherwise I
 - A `workout_date` is **in the current week** iff `week_start <= workout_date <= week_end` (inclusive, date comparison).
 
 > Because comparison is date-based (not datetime), there is no ambiguity around midnight or DST for the eligibility check; the Europe/Nicosia timezone is only used to determine what "today" is.
+
+### Late-submission grace period (accepted window ⊇ current week)
+
+The weekly boards do not post until **Mon 09:00** (pairs) / **09:05** (individual), so a workout finished on Sunday but posted a few minutes after midnight can still legitimately count toward the week being reported. Previously the handler compared the workout date against `current_week_bounds()` alone and rejected such a submission the instant the week rolled over — **silently**, producing the production log line `Workout date 2026-08-09 is outside current week (2026-08-10—2026-08-16); ignoring.`
+
+The date check therefore uses an **accepted window** rather than the bare current week, computed by `accepted_workout_window(tz, grace_until_hour, now=<message timestamp>)` in [`bot/utils/dates.py`](bot/utils/dates.py):
+
+- Normally the window is exactly the current Mon–Sun week.
+- When the submission moment is **Monday** and its **local hour < `grace_until_hour`**, the window is extended **backwards by 7 days** to `(current_week_start - 7d, current_week_end)`, so the whole just-finished week is accepted.
+- `grace_until_hour == 0` disables the extension entirely (strict current-week-only).
+- The submission moment is the **message's own timestamp** (converted to the configured timezone), not wall-clock "now", so the decision is deterministic and testable.
+
+**The real `workout_date` is preserved.** An accepted late row is written with its actual date (e.g. `2026-08-09`) and is **never** shifted into the new week. Consequences:
+
+- **Aggregation:** `read_rows_in_range(prev_start, prev_end)` for the previous Mon–Sun window includes the row, so it counts on the 09:00/09:05 boards for the week it belongs to.
+- **Running weekly count:** the handler derives the scoring week with `week_bounds_containing(wdate)` — the week the workout's **own date** falls in — and passes it to `count_user_workouts_in_week()`. A late run is therefore counted against the **previous** week, keeping the plan-based `30/plan` rate and the `OVERACHIEVEMENT_RATE` halving correct rather than mis-scoring it as the new week's first workout.
+- **Streak rollover:** unchanged — it reads the same previous-week window, so a late row also feeds the streak evaluation when the rollover runs.
+
+The `SEASON_START_DATE` cutoff and duplicate-image detection stay **fully in force** for late submissions.
+
+Configured by `LATE_SUBMISSION_GRACE_UNTIL_HOUR` → `Settings.late_submission_grace_until_hour` (default **9**). A malformed value (non-integer or outside 0–23) raises `ConfigError` at startup, matching the fail-fast style of `SEASON_START_DATE`.
 
 ### Season start date (points/leaderboard reset cutoff)
 
@@ -469,13 +490,37 @@ Per-activity minimum duration & reply behaviour (uses the vision
 - If `duration_minutes` is `null` (couldn't be read) for a bonus activity, the
   bot replies `⚠️ Couldn't read the duration — no points awarded.` and does
   **not** log/award.
-- The below-minimum and no-duration cases are the **only** bonus-activity paths
-  that reply while NOT logging; every other non-eligible path (old-week,
-  duplicate, non-Garmin, not completed, `other`) stays **silent** as before.
+- The below-minimum and no-duration cases reply while NOT logging. Every other
+  non-eligible path (outside the accepted window, non-Garmin, not completed,
+  `other`) **also replies now** — see
+  [No silent drops](#no-silent-drops-every-rejection-replies). Only a
+  **duplicate** re-submission stays silent.
 - Qualifying bonus rows are written to `Log` (with the correct `activity_type`
   and `points = 5`) via the same write-first + retry + dedup-recheck path as
   running, and **count in the weekly/monthly leaderboards** (the aggregation
   sums all rows in range regardless of `activity_type`).
+
+### No silent drops (every rejection replies)
+
+A submission is **never** ignored without feedback. Every path in
+[`bot/handlers/photo.py`](bot/handlers/photo.py) that awards no points sends a
+short, non-technical reply through the module-local `_safe_reply()` helper (same
+contract as the one in [`bot/handlers/commands.py`](bot/handlers/commands.py): it
+swallows and logs `TelegramError`, so a failed send can never crash the handler
+or undo a confirmed Sheet write).
+
+| Path | Reply |
+|------|-------|
+| Workout date outside the accepted window | `⚠️ This workout is dated {date}, which is outside the week we're currently counting. Points can only be added for the current week.` |
+| Vision returned no usable verdict (parse/API failure) | `⚠️ Couldn't read this screenshot — no points awarded. Please try again with a clear workout summary screenshot.` |
+| Verdict not eligible (unsupported app, not completed, low confidence) | `⚠️ Couldn't confirm a completed workout in this screenshot — no points awarded. Please send the workout summary screenshot from Garmin or WHOOP.` |
+| Activity type not awardable (`other`, swimming, unrecognized) | `⚠️ This activity type doesn't earn points. Points are awarded for running, walking, cycling and strength workouts.` |
+| `workout_date` unparseable after validation | `⚠️ Couldn't read the workout date — no points awarded.` |
+| Sheet append failed after retries | `⚠️ Couldn't save this workout just now — please send the screenshot again in a few minutes.` |
+| Summary/achievements screen (**unchanged text**) | `⚠️ This looks like a summary/achievements screen, not a completed workout. Please send the workout summary screenshot from Garmin or WHOOP.` |
+| Bonus activity, unreadable duration (**unchanged text**) | `⚠️ Couldn't read the duration — no points awarded.` |
+| Bonus activity below minimum (**unchanged text**) | `⚠️ {Noun} is {dur} min — minimum is {minimum} min to earn points.` |
+| **Duplicate** re-submission | *(intentionally silent — by design)* |
 
 ### Decision Pseudocode
 
@@ -485,24 +530,33 @@ function decide_and_process(message, verdict, image_hash):
     if not (verdict.is_garmin and verdict.is_completed
             and verdict.workout_date is not None
             and verdict.confidence >= MIN_CONFIDENCE):
-        return IGNORE   # silent
+        reply("⚠️ Couldn't confirm a completed workout ...")
+        return REJECT
 
     activity = verdict.activity_type
     if activity != "running" and activity not in BONUS_ACTIVITIES:
-        return IGNORE   # silent (other/legacy types are not awardable)
+        reply("⚠️ This activity type doesn't earn points. ...")
+        return REJECT
 
-    tz = ZoneInfo("Europe/Nicosia")
-    today = datetime.now(tz).date()
-    week_start = today - timedelta(days=today.weekday())   # Monday
-    week_end = week_start + timedelta(days=6)              # Sunday
     wdate = date.fromisoformat(verdict.workout_date)
 
-    if not (week_start <= wdate <= week_end):
-        return IGNORE   # older than current week → silent, no log, no reply
+    # Accepted window = current Mon–Sun week, extended over the PREVIOUS week
+    # while it is Monday before LATE_SUBMISSION_GRACE_UNTIL_HOUR (default 9).
+    accepted_start, accepted_end = accepted_workout_window(
+        TIMEZONE, LATE_SUBMISSION_GRACE_UNTIL_HOUR, now=message.date)
+
+    if not (accepted_start <= wdate <= accepted_end):
+        reply(f"⚠️ This workout is dated {wdate}, which is outside the week "
+              "we're currently counting. ...")
+        return REJECT
+
+    # Score against the week the workout's OWN date belongs to — for an accepted
+    # late submission that is the PREVIOUS week, not the new one.
+    week_start, week_end = week_bounds_containing(wdate)
 
     # dedup (Section 10) already checked BEFORE calling vision, but re-check race:
     if sheets.exists(user_id=message.from_user.id, image_hash=image_hash):
-        return IGNORE   # silent
+        return IGNORE   # silent (duplicate — the only silent path)
 
     if activity == "running":
         plan = sheets.get_plan(user_id)                    # default 3
@@ -520,6 +574,8 @@ function decide_and_process(message, verdict, image_hash):
         points = BONUS_ACTIVITY_POINTS                     # flat 5
         reply = f"✅ Nice {activity_label(activity)}, {name}! +5 points."
 
+    # The row keeps verdict.workout_date VERBATIM — a late submission is never
+    # shifted into the new week.
     row = build_log_row(message, verdict, points, image_hash)
     sheets.append_row(row)                     # real-time log (write-first)
     logger.info("Logged workout: user=%s date=%s activity=%s points=%s", ...)
@@ -528,7 +584,7 @@ function decide_and_process(message, verdict, image_hash):
 ```
 
 
-**Write-first, then reply:** on success the row is written to the Sheet and an INFO log line `Logged workout: user=... date=... points=<computed>` is emitted; **only after** the confirmed write does the bot reply in chat with `✅ Nice run, {name}! +{points} points.`. A failed reply is logged but never undoes the saved row. Failures/ignored images remain silent. (Weekly/monthly leaderboards are still posted to the group.)
+**Write-first, then reply:** on success the row is written to the Sheet and an INFO log line `Logged workout: user=... date=... points=<computed>` is emitted; **only after** the confirmed write does the bot reply in chat with `✅ Nice run, {name}! +{points} points.`. A failed reply is logged but never undoes the saved row. Rejections and failures now reply too (see [No silent drops](#no-silent-drops-every-rejection-replies)); only duplicates stay silent. (Weekly/monthly leaderboards are still posted to the group.)
 
 ### Streak Bonus (weekly rollover)
 
@@ -699,6 +755,7 @@ An empty `PAIRS` yields no entries and the job is not registered at all (nothing
 | `MIN_CONFIDENCE` | no | Float threshold (default `0.6`) below which vision verdicts are ignored. |
 | `POINTS_PER_RUN` | no | Legacy gate value (default `10`). Under the plan-based model this no longer sets the per-workout points — it only ensures `running` is an awardable activity type; actual points come from `workout_points()` (see Section 5). |
 | `SEASON_START_DATE` | no | ISO date `YYYY-MM-DD` (default `2026-07-12`). Points and the leaderboard count **only** submissions dated **on or after** this date; earlier submissions are ignored so the season restarts everyone at zero without deleting registrations or coach-assigned plans (see Section 5). Parsed into `Settings.season_start_date` (a `datetime.date`); an invalid value fails fast at startup. |
+| `LATE_SUBMISSION_GRACE_UNTIL_HOUR` | no | Integer hour `0`–`23` (default `9`). The **Monday** hour (local `TIMEZONE`) until which a workout dated in the **just-finished** Mon–Sun week is still accepted and scored — the default `9` matches the Mon 09:00/09:05 leaderboards. The row keeps its **real** `workout_date`, so it counts toward the week being reported (see Section 5). Set to `0` to **disable** the grace period (strict current-week-only). Parsed into `Settings.late_submission_grace_until_hour`; a non-integer or out-of-range value raises `ConfigError` at startup, like `SEASON_START_DATE`. |
 | `COACH_IDS` | no | Comma-separated Telegram user IDs (e.g. `123,456`) allowed to set up workouts/plans (run `/setplan`). Only coaches can set plans — regular users cannot set up their own workouts. Blank/unset → empty set (no coaches; nobody can set plans). Whitespace/blank entries are ignored; non-integer entries are **skipped with a logged warning** (never a boot failure). Exposed via `Settings.coach_ids` and the `Settings.is_coach(user_id)` helper. |
 | `PAIRS` | no | Competition pairs for the weekly **pairs** leaderboard (Section 7). Pairs separated by `,`, the two Telegram user IDs within a pair joined by `+` — e.g. `123+456,789+1011`. **Unset** → the coach's built-in defaults (`config.DEFAULT_PAIRS`: `5025515480+572559211`, `6599040404+6108222286`, `1406051646+6572975237`, `1274840834+871410038`). **Explicitly empty** (`PAIRS=`) → an empty list, which **disables** the feature (job not registered, nothing posted, logged at INFO). **Malformed** — an entry that isn't exactly two `+`-separated integers — raises `ConfigError` and **fails fast** at startup, like a bad `SEASON_START_DATE`. Parsed by `_parse_pairs()` into `Settings.pairs: list[tuple[int, int]]`, preserving the configured Member A → Member B order used in the rendered label. |
 | `LOG_LEVEL` | no | Logging verbosity (default `INFO`). |
@@ -779,17 +836,18 @@ tzdata>=2024.1
 |------|----------|
 | **Duplicate submission** (same user + same image hash) | Rejected silently. Dedup lookup runs **before** the (costly) vision call; a second race-safe check runs before append. |
 | **Non-photo messages** | Ignored by handler filter (`filters.PHOTO`). |
-| **Photo but not Garmin/WHOOP / unsupported activity / planned only** | Vision verdict fails eligibility → silent ignore. |
+| **Photo but not Garmin/WHOOP / unsupported activity / planned only** | Vision verdict fails eligibility → no points, and the bot replies `⚠️ Couldn't confirm a completed workout in this screenshot — no points awarded. Please send the workout summary screenshot from Garmin or WHOOP.` |
 | **Garmin achievements/badges screen or WHOOP daily overview (Strain/Recovery/Sleep/Health Monitor/coach card)** | `is_achievement=true` → not eligible; the bot replies `⚠️ This looks like a summary/achievements screen, not a completed workout. Please send the workout summary screenshot from Garmin or WHOOP.` and awards nothing. |
 | **WHOOP workout with no distance/pace/map** | Normal for WHOOP — accepted on the `ACTIVITY STRAIN` + `DURATION H:MM:SS` + `ZONE n … BPM` markers; scored exactly like Garmin. |
-| **Workout older than current week** | Silent ignore (no log, no reply). |
-| **Low confidence** (`< MIN_CONFIDENCE`) | Treated as ignore. |
+| **Workout dated in the just-finished week, submitted Monday before `LATE_SUBMISSION_GRACE_UNTIL_HOUR`** | **Accepted and scored** (grace period, Section 5). The row keeps its real `workout_date`, and running points count it against that previous week. |
+| **Workout older than the accepted window** (e.g. previous week submitted Mon 09:30 or later, or on any other day) | No log, no points; the bot replies `⚠️ This workout is dated {date}, which is outside the week we're currently counting. Points can only be added for the current week.` |
+| **Low confidence** (`< MIN_CONFIDENCE`) | No points; replies with the "couldn't confirm a completed workout" message above. |
 | **Claude JSON parse failure** | Fallback substring extraction; if still invalid → ignore + warning log. |
 | **Claude API error / timeout / rate limit** | Optional single retry with backoff; on final failure → ignore + warning log. No user-facing error to avoid group spam. |
 | **Malformed / corrupt image bytes** | If download or base64 encoding fails → ignore + warning log. |
 | **Missing `workout_date`** (WHOOP shows only a time-of-day range) | The handler substitutes the **submission/message date** (message timestamp in `TIMEZONE`) before the eligibility gate, so the photo is still processed and no empty date is written. |
 | **Large integer IDs precision** | Written as text to the Sheet; read back and parsed as int. |
-| **Google Sheets write failure** | Log ERROR (visible in Railway logs); stay silent (no chat message). Retries with backoff run before final failure. |
+| **Google Sheets write failure** | Log ERROR (visible in Railway logs) and reply `⚠️ Couldn't save this workout just now — please send the screenshot again in a few minutes.` Retries with backoff run before final failure. |
 | **Google Sheets read failure during leaderboard** | Log error; post a graceful "leaderboard unavailable, will retry" message or skip; scheduler will fire again next period. |
 | **Restart near scheduled fire time** | `misfire_grace_time=3600` + `coalesce=True` ensure at most one leaderboard post. |
 | **User with no username** | `telegram_username` empty; display falls back to full name, then `user {id}`. |
@@ -822,7 +880,10 @@ sequenceDiagram
             B->>S: append_row (10 pts, running, ...)
             B->>B: INFO log (after confirmed write)
             B-->>U: ✅ Nice run, {name}! +{points} points.
-        else eligible but older than current week
-            B-->>U: (silent, no reply)
+        else eligible, previous week, Monday before the grace cutoff
+            B->>S: append row (real workout_date, previous week)
+            B-->>U: ✅ Nice run, {name}! +{points} points.
+        else eligible but outside the accepted window
+            B-->>U: ⚠️ This workout is dated {date}, which is outside the week we're currently counting.
         end
     end

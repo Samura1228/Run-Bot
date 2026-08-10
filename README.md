@@ -20,10 +20,17 @@ whenever someone posts a **photo**, it:
      minimum it replies with a short warning and awards nothing. These are
      **separate bonus points** — they don't affect the running plan or streak.
 
-   Otherwise (old week, duplicate, unsupported app, not completed,
-   unrecognized) it silently ignores the photo. A **summary screen** (Garmin
+   Otherwise (outside the counted window, unsupported app, not completed,
+   unrecognized) it awards nothing but **always replies with a short reason** —
+   a submission is **never silently dropped**. A **summary screen** (Garmin
    achievements/badges or a WHOOP daily overview) gets a short warning reply and
-   no points.
+   no points. The only intentionally silent case is a **duplicate**
+   re-submission of the same screenshot.
+
+   A workout dated in the **just-finished week** is still accepted on **Monday
+   before 09:00** (the [late-submission grace
+   period](#late-submission-grace-period)), since the weekly boards haven't
+   posted yet.
 4. Automatically posts a **weekly pairs leaderboard** every Monday at 09:00, the
    **weekly individual leaderboard** every Monday at 09:05, and a **monthly
    leaderboard** on the 1st of each month at 09:00 (Europe/Nicosia). Both weekly
@@ -46,8 +53,9 @@ Google Sheets is the **single source of truth**, so restarts never lose data.
 6. [Step 5 — Run locally](#step-5--run-locally)
 7. [Step 6 — Deploy to Railway](#step-6--deploy-to-railway)
 8. [How the leaderboards work](#how-the-leaderboards-work)
-9. [Environment variables reference](#environment-variables-reference)
-10. [Troubleshooting](#troubleshooting)
+9. [Late-submission grace period](#late-submission-grace-period)
+10. [Environment variables reference](#environment-variables-reference)
+11. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -296,7 +304,7 @@ Run Bot uses **long-polling**, so it runs as a **worker** (no HTTP port).
    - `TARGET_CHAT_ID` *(optional at first — boot the bot, run `/chatid` to
      discover it, then set it and redeploy)*
    - `TIMEZONE`, `MIN_CONFIDENCE`, `POINTS_PER_RUN`, `SEASON_START_DATE`,
-     `LOG_LEVEL` *(optional)*
+     `LATE_SUBMISSION_GRACE_UNTIL_HOUR`, `LOG_LEVEL` *(optional)*
 4. Deploy. Watch the **Deploy Logs** — you should see the same startup lines as
    local. Because it's long-polling, the worker **stays alive** indefinitely.
 5. `restartPolicyType = "ON_FAILURE"` (in `railway.toml`) automatically restarts
@@ -333,6 +341,29 @@ Run Bot uses **long-polling**, so it runs as a **worker** (no HTTP port).
   simply no longer count.
 - If nobody logged a run in the period, the bot still posts a friendly "no runs
   logged" message so the group knows it's alive.
+
+### Late-submission grace period
+
+The weekly boards don't post until **Monday 09:00** (pairs) / **09:05**
+(individual), so a workout finished on Sunday but posted a few minutes after
+midnight can still legitimately count. Previously such a submission was rejected
+the instant the week rolled over — and rejected **silently**.
+
+- On **Monday before `LATE_SUBMISSION_GRACE_UNTIL_HOUR`** (default **9**, local
+  `TIMEZONE`), a workout dated anywhere in the **just-finished** Monday–Sunday
+  week is **accepted and scored**.
+- The row keeps its **real `workout_date`** — it is **never** shifted into the new
+  week — so it is picked up by the 09:00/09:05 aggregation for the week being
+  reported. Running points also count it against **that** week, so the plan-based
+  `30/plan` rate and the overachievement halving stay correct.
+- **After** the cutoff (e.g. Monday 09:30) or on **any other day**, previous-week
+  submissions are rejected with a clear reply:
+  `⚠️ This workout is dated {date}, which is outside the week we're currently counting. Points can only be added for the current week.`
+- Set `LATE_SUBMISSION_GRACE_UNTIL_HOUR=0` to **disable** the grace period
+  (strict current-week-only). A malformed value (non-integer or outside 0–23)
+  **fails fast** at startup with a clear `ConfigError`, like `SEASON_START_DATE`.
+- The `SEASON_START_DATE` cutoff and duplicate-image detection remain **fully in
+  force** for late submissions.
 
 Example output:
 
@@ -450,18 +481,35 @@ streak, or overachievement (those stay running-only).
   with the short warning above. If Claude can't read a duration for a bonus
   activity, it replies `⚠️ Couldn't read the duration — no points awarded.`
 - Same rules as running otherwise: it must be a **Garmin or WHOOP**,
-  **completed** activity dated in the **current week**, above the confidence
-  threshold, and not a duplicate — otherwise it's silently ignored. A WHOOP
-  `WALKING 0:59:20` (59 min) or `STRENGTH TRAINER 0:55:59` (55 min) clears its
-  minimum and earns the usual +5.
+  **completed** activity dated in the **counted window**, above the confidence
+  threshold, and not a duplicate — otherwise it's rejected **with a reply**. A
+  WHOOP `WALKING 0:59:20` (59 min) or `STRENGTH TRAINER 0:55:59` (55 min) clears
+  its minimum and earns the usual +5.
 
 **Eligibility:** a photo is only awarded if Claude confirms it's a **Garmin or
 WHOOP**, **completed** activity of a supported type (**running**, **walking**,
-**cycling**, or **strength**) with a **valid date** in the **current week** and
-confidence ≥ `MIN_CONFIDENCE` (default **0.6**). If the screenshot shows no date
-(typical for WHOOP), the **date you posted it** is used. Bonus activities
-additionally require their minimum duration. Everything else is silently
-ignored.
+**cycling**, or **strength**) with a **valid date** in the **current week** —
+or, on Monday before 09:00, the **just-finished** week (see
+[Late-submission grace period](#late-submission-grace-period)) — and confidence ≥
+`MIN_CONFIDENCE` (default **0.6**). If the screenshot shows no date (typical for
+WHOOP), the **date you posted it** is used. Bonus activities additionally require
+their minimum duration.
+
+**Nothing is silently dropped.** Every path that awards no points now sends a
+short, friendly reply:
+
+| Situation | Reply |
+| --- | --- |
+| Dated outside the counted window | `⚠️ This workout is dated {date}, which is outside the week we're currently counting. Points can only be added for the current week.` |
+| Screenshot unreadable by the vision step | `⚠️ Couldn't read this screenshot — no points awarded. Please try again with a clear workout summary screenshot.` |
+| No completed workout confirmed (unsupported app, not completed, low confidence) | `⚠️ Couldn't confirm a completed workout in this screenshot — no points awarded. Please send the workout summary screenshot from Garmin or WHOOP.` |
+| Activity type that earns nothing (e.g. `other`/swimming) | `⚠️ This activity type doesn't earn points. Points are awarded for running, walking, cycling and strength workouts.` |
+| Workout date couldn't be parsed | `⚠️ Couldn't read the workout date — no points awarded.` |
+| Summary/achievements screen | `⚠️ This looks like a summary/achievements screen, not a completed workout. Please send the workout summary screenshot from Garmin or WHOOP.` |
+| Sheet write failed after retries | `⚠️ Couldn't save this workout just now — please send the screenshot again in a few minutes.` |
+
+The one intentional exception is a **duplicate** re-submission of the same
+screenshot, which stays silent by design.
 
 ## Diagnostics
 
@@ -556,6 +604,7 @@ for you.` and does nothing. Coaches can set or view **other** members' plans.
 | `MIN_CONFIDENCE` | ❌ | `0.6` | Min vision confidence to accept a verdict. |
 | `POINTS_PER_RUN` | ❌ | `10` | Legacy setting. Under the plan-based model it no longer sets per-run points — it only marks `running` as awardable. Actual points come from each user's plan (set with `/setplan`). |
 | `SEASON_START_DATE` | ❌ | `2026-07-12` | ISO date (`YYYY-MM-DD`). Points and the leaderboard count only submissions dated on or after this date; earlier submissions are ignored so the season restarts everyone at zero without deleting registrations or coach-assigned plans. |
+| `LATE_SUBMISSION_GRACE_UNTIL_HOUR` | ❌ | `9` | The Monday hour (0–23, local `TIMEZONE`) until which a workout dated in the **just-finished** Mon–Sun week is still accepted and scored — the default `9` matches the Mon 09:00/09:05 leaderboards. The row keeps its real `workout_date`, so it counts toward the week being reported. Set to `0` to disable (strict current-week-only). Malformed values (non-integer or outside 0–23) fail fast with a `ConfigError`. |
 | `COACH_IDS` | ❌ | *(empty)* | Comma-separated Telegram user IDs (e.g. `123,456`) allowed to set up workouts/plans. Only coaches can run `/setplan`; regular users cannot set up their own workouts. Blank/unset → no coaches (nobody can set plans). Non-integer entries are skipped with a warning. Use `/whoami` (reply to a member) to find IDs. |
 | `PAIRS` | ❌ | *(the coach's 4 default pairs)* | Competition pairs for the weekly **pairs** leaderboard. Pairs separated by `,`, the two Telegram user IDs within a pair joined by `+` — e.g. `123+456,789+1011`. Unset → the built-in default pairs. Set to an **empty** value (`PAIRS=`) to **disable** the pairs board (job not registered, nothing posted). A **malformed** entry (not exactly two `+`-separated integers) **fails fast** at startup with a `ConfigError`. See [Pairs leaderboard](#pairs-leaderboard). |
 | `LOG_LEVEL` | ❌ | `INFO` | `DEBUG`/`INFO`/`WARNING`/`ERROR`. |
@@ -580,8 +629,12 @@ See [`.env.example`](.env.example) for a copy-paste template.
   sign) and the bot can send messages in that group. If the startup logs say
   *"TARGET_CHAT_ID not set"*, run `/chatid` in the group, set the variable, and
   redeploy.
-- **Valid run not awarded:** it must be dated **within the current Mon–Sun
-  week** (Cyprus time) and pass the confidence threshold; older or low-confidence
+- **Valid run not awarded:** it must be dated **within the current Mon–Sun week**
+  (Cyprus time) — or, on Monday before 09:00, the **just-finished** week (see
+  [Late-submission grace period](#late-submission-grace-period)) — and pass the
+  confidence threshold. Older or low-confidence runs earn no points, but the bot
+  now **always replies with the reason**, so check its reply in the chat.
+
 ### Conflict / "terminated by other getUpdates request"
 
 If the logs show `telegram.error.Conflict: terminated by other getUpdates
@@ -606,4 +659,3 @@ ANTHROPIC_MODEL to a valid model`, distinct from an `❌ invalid API key`.
 If you see `not_found_error` for the model (e.g. an alias your account can't
 use), set `ANTHROPIC_MODEL` to a model ID your Anthropic account has access to
 (see your Anthropic Console). The default is `claude-3-5-sonnet-20241022`.
-  runs are silently ignored by design.

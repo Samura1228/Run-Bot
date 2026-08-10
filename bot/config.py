@@ -54,6 +54,15 @@ class Settings(BaseModel):
     # optional ``SEASON_START_DATE`` env var (``YYYY-MM-DD``); defaults to the
     # 2026-07-12 season restart.
     season_start_date: date = Field(default=date(2026, 7, 12))
+    # Late-submission grace period: on MONDAY, until this hour (local time in
+    # ``timezone``), a workout dated in the immediately-preceding Mon–Sun week is
+    # still accepted and scored — because the weekly boards do not post until
+    # Mon 09:00 (pairs) / 09:05 (individual), so those points can still
+    # legitimately count. Sourced from the optional
+    # ``LATE_SUBMISSION_GRACE_UNTIL_HOUR`` env var; defaults to 9 to match the
+    # 09:00 board. Set to ``0`` to DISABLE the grace period (strict
+    # current-week-only behaviour).
+    late_submission_grace_until_hour: int = Field(default=9, ge=0, le=23)
     # Telegram user IDs allowed to set/view OTHER users' plans (coaches).
     # Sourced from the optional ``COACH_IDS`` env var (comma-separated). Empty
     # set means no coaches configured (self-service still works for everyone).
@@ -118,6 +127,35 @@ def _parse_season_start_date(raw: Optional[str]) -> Optional[date]:
             "SEASON_START_DATE must be an ISO date (YYYY-MM-DD), "
             f"got: {raw!r}"
         ) from exc
+
+
+def _parse_late_submission_grace_until_hour(raw: Optional[str]) -> Optional[int]:
+    """Parse ``LATE_SUBMISSION_GRACE_UNTIL_HOUR`` into an hour-of-day int.
+
+    The value is the Monday hour (local time, 0–23) until which a
+    previous-week workout is still accepted; ``0`` disables the grace period
+    entirely (strict current-week-only). A blank/unset value yields ``None`` so
+    the :class:`Settings` default (``9``, matching the Mon 09:00 leaderboard)
+    applies. Like ``SEASON_START_DATE``, a malformed value raises
+    :class:`ConfigError` so a typo fails fast at startup rather than silently
+    changing which submissions are counted.
+    """
+
+    if raw is None or raw.strip() == "":
+        return None
+    try:
+        hour = int(raw.strip())
+    except ValueError as exc:
+        raise ConfigError(
+            "LATE_SUBMISSION_GRACE_UNTIL_HOUR must be an integer hour 0–23 "
+            f"(0 disables the grace period), got: {raw!r}"
+        ) from exc
+    if not 0 <= hour <= 23:
+        raise ConfigError(
+            "LATE_SUBMISSION_GRACE_UNTIL_HOUR must be an integer hour 0–23 "
+            f"(0 disables the grace period), got: {hour}"
+        )
+    return hour
 
 
 def _parse_pairs(raw: Optional[str]) -> Optional[list[tuple[int, int]]]:
@@ -277,6 +315,19 @@ def load_settings() -> Settings:
     )
     if season_start_date is not None:
         kwargs["season_start_date"] = season_start_date
+    # LATE_SUBMISSION_GRACE_UNTIL_HOUR is optional: blank/unset → the Settings
+    # default (9, matching the Mon 09:00 board); 0 disables the grace period;
+    # malformed → ConfigError.
+    grace_until_hour = _parse_late_submission_grace_until_hour(
+        os.environ.get("LATE_SUBMISSION_GRACE_UNTIL_HOUR")
+    )
+    if grace_until_hour is not None:
+        kwargs["late_submission_grace_until_hour"] = grace_until_hour
+        if grace_until_hour == 0:
+            logger.info(
+                "LATE_SUBMISSION_GRACE_UNTIL_HOUR is 0 — previous-week "
+                "submissions are rejected as soon as the week rolls over."
+            )
     # PAIRS is optional: unset → the DEFAULT_PAIRS default applies; explicitly
     # blank → an empty list (pairs board disabled); malformed → ConfigError.
     pairs = _parse_pairs(os.environ.get("PAIRS"))

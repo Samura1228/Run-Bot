@@ -1,18 +1,24 @@
 """Photo handler.
 
 Orchestrates the full pipeline for photo messages:
-download → hash → dedup → vision → decision → silent log.
+download → hash → dedup → vision → decision → log + reply.
 
 Screenshots from BOTH supported apps — Garmin Connect and WHOOP — flow through
 this single pipeline and score identically. WHOOP workout screens often show
 only a time-of-day range with no date, so a missing ``workout_date`` falls back
 to the submission (message) date instead of being rejected.
 
-On a successful, eligible current-week run the row is written to the Google
-Sheet FIRST; once the write is confirmed and the INFO log is emitted, the bot
-replies to the chat with "✅ Nice run, {name}! +{points} points.". All
-non-eligible / failure paths are handled silently (no chat reply), remaining
-observable only via logs, per the blueprint.
+A workout dated in the just-finished week is still accepted during the
+Monday-morning late-submission grace period (before the 09:00/09:05 leaderboards
+post) — see :func:`bot.utils.dates.accepted_workout_window`. Such a row keeps its
+REAL ``workout_date`` and is scored against the week that date belongs to.
+
+On a successful, eligible run the row is written to the Google Sheet FIRST; once
+the write is confirmed and the INFO log is emitted, the bot replies to the chat
+with "✅ Nice run, {name}! +{points} points.". Rejections are never silent: every
+path that declines to award points sends a short, friendly explanation via
+:func:`_safe_reply` (the only exception is a duplicate re-submission, which stays
+silent by design), and all decisions remain observable via logs.
 """
 
 from __future__ import annotations
@@ -30,7 +36,13 @@ from bot.models import WorkoutLogRow
 from bot.services.leaderboard import LeaderboardService  # noqa: F401 (type hints)
 from bot.services.sheets import SheetsService
 from bot.services.vision import ClaudeVisionService
-from bot.utils.dates import current_week_bounds, in_range, today_in
+from bot.utils.dates import (
+    accepted_workout_window,
+    current_week_bounds,
+    in_range,
+    today_in,
+    week_bounds_containing,
+)
 from bot.utils.hashing import compute_image_hash
 from bot.utils.points import (
     ACTIVITY_MIN_MINUTES,
@@ -50,6 +62,23 @@ _BELOW_MIN_NOUN = {
 }
 
 logger = logging.getLogger(__name__)
+
+
+async def _safe_reply(message, text: str) -> None:
+    """Send a plain-text reply, swallowing/logging any Telegram failure.
+
+    Mirrors the helper of the same name in :mod:`bot.handlers.commands` (kept
+    local so the photo pipeline does not import the command module). Used by
+    every rejection path so a failed send can never crash the handler or undo a
+    confirmed Sheet write.
+    """
+
+    try:
+        await message.reply_text(text)
+    except TelegramError as exc:
+        logger.error("Failed to send reply: %s", exc)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.error("Unexpected error sending reply: %s", exc)
 
 
 class PhotoHandler:
@@ -128,7 +157,17 @@ class PhotoHandler:
         # 4) Vision analysis.
         verdict = await self._vision.analyze(image_bytes)
         if verdict is None:
-            # Parse/API/validation failure → silent ignore.
+            # Parse/API/validation failure → tell the poster rather than drop
+            # the submission silently.
+            logger.info(
+                "Vision analysis returned no usable verdict for user %s.",
+                user.id,
+            )
+            await _safe_reply(
+                message,
+                "⚠️ Couldn't read this screenshot — no points awarded. Please "
+                "try again with a clear workout summary screenshot.",
+            )
             return
 
         # 5a) Reject summary screens explicitly (not a completed-workout
@@ -144,14 +183,12 @@ class PhotoHandler:
                 user.id,
                 verdict.source,
             )
-            try:
-                await message.reply_text(
-                    "⚠️ This looks like a summary/achievements screen, not a "
-                    "completed workout. Please send the workout summary "
-                    "screenshot from Garmin or WHOOP."
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.error("Failed to send summary-screen reply: %s", exc)
+            await _safe_reply(
+                message,
+                "⚠️ This looks like a summary/achievements screen, not a "
+                "completed workout. Please send the workout summary "
+                "screenshot from Garmin or WHOOP.",
+            )
             return
 
         # 5a-bis) Missing date → fall back to the submission date. WHOOP workout
@@ -178,7 +215,7 @@ class PhotoHandler:
         if not verdict.is_eligible(self._settings.min_confidence):
             logger.info(
                 "Verdict not eligible (supported=%s source=%s type=%s "
-                "completed=%s date=%s conf=%.2f); ignoring.",
+                "completed=%s date=%s conf=%.2f); rejecting.",
                 verdict.is_garmin,
                 verdict.source,
                 verdict.activity_type,
@@ -186,36 +223,81 @@ class PhotoHandler:
                 verdict.workout_date,
                 verdict.confidence,
             )
+            await _safe_reply(
+                message,
+                "⚠️ Couldn't confirm a completed workout in this screenshot — "
+                "no points awarded. Please send the workout summary screenshot "
+                "from Garmin or WHOOP.",
+            )
             return
 
         # Gate: only awardable activity types proceed. Running uses the
         # plan-based model; walking/cycling/strength are flat bonus activities.
-        # Anything else ("other"/unrecognized) is silently ignored.
+        # Anything else ("other"/unrecognized) earns no points — but the poster
+        # is told so instead of being ignored.
         activity = verdict.activity_type
         if activity != "running" and activity not in BONUS_ACTIVITIES:
             logger.info(
-                "Activity type %r is not awardable; ignoring.",
+                "Activity type %r is not awardable; rejecting.",
                 activity,
+            )
+            await _safe_reply(
+                message,
+                "⚠️ This activity type doesn't earn points. Points are awarded "
+                "for running, walking, cycling and strength workouts.",
             )
             return
 
-        # 6) Date-window: must be within the current Mon–Sun week.
+        # 6) Date-window: the current Mon–Sun week, EXTENDED backwards over the
+        # previous week during the Monday-morning late-submission grace period
+        # (before the 09:00/09:05 boards post). See
+        # :func:`accepted_workout_window`.
         assert verdict.workout_date is not None  # guaranteed by eligibility
         try:
             wdate = date.fromisoformat(verdict.workout_date)
         except ValueError:
             logger.warning("Invalid workout_date after validation; ignoring.")
+            await _safe_reply(
+                message,
+                "⚠️ Couldn't read the workout date — no points awarded.",
+            )
             return
 
-        week_start, week_end = current_week_bounds(self._settings.timezone)
-        if not in_range(wdate, week_start, week_end):
+        accepted_start, accepted_end = accepted_workout_window(
+            self._settings.timezone,
+            self._settings.late_submission_grace_until_hour,
+            now=getattr(message, "date", None),
+        )
+        if not in_range(wdate, accepted_start, accepted_end):
             logger.info(
-                "Workout date %s is outside current week (%s–%s); ignoring.",
+                "Workout date %s is outside the accepted window (%s–%s); "
+                "rejecting.",
+                wdate,
+                accepted_start,
+                accepted_end,
+            )
+            await _safe_reply(
+                message,
+                f"⚠️ This workout is dated {wdate.isoformat()}, which is "
+                "outside the week we're currently counting. Points can only be "
+                "added for the current week.",
+            )
+            return
+
+        # Score the workout against the week its OWN date belongs to. For a
+        # normal submission that is the current week; for one accepted under the
+        # grace period it is the PREVIOUS week — which is exactly the week being
+        # reported at 09:00/09:05, so the running weekly count (and therefore the
+        # plan-based 30/plan rate and the overachievement halving) stays correct.
+        week_start, week_end = week_bounds_containing(wdate)
+        if (week_start, week_end) != current_week_bounds(self._settings.timezone):
+            logger.info(
+                "Late submission accepted under the grace period: workout date "
+                "%s scored against its own week (%s–%s).",
                 wdate,
                 week_start,
                 week_end,
             )
-            return
 
         # 7) Race-safe dedup re-check just before append.
         try:
@@ -240,9 +322,11 @@ class PhotoHandler:
 
         if activity == "running":
             # RUNNING (unchanged): plan-based fractional points. Count how many
-            # running workouts the user has ALREADY logged this current week
-            # (excluding this one, streak_bonus rows, and other users), then
-            # compute the plan-based per-workout value.
+            # running workouts the user has ALREADY logged in the week THIS
+            # workout's date belongs to (excluding this one, streak_bonus rows,
+            # and other users), then compute the plan-based per-workout value.
+            # Using the workout's own week keeps a late submission scored against
+            # the week it was actually performed in.
             try:
                 plan = await self._sheets.get_plan(user.id)
             except Exception as exc:
@@ -277,12 +361,10 @@ class PhotoHandler:
             dur = verdict.duration_minutes
             if dur is None:
                 # Duration couldn't be read → can't score. No log, no points.
-                try:
-                    await message.reply_text(
-                        "⚠️ Couldn't read the duration — no points awarded."
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    logger.error("Failed to send no-duration reply: %s", exc)
+                await _safe_reply(
+                    message,
+                    "⚠️ Couldn't read the duration — no points awarded.",
+                )
                 logger.info(
                     "Bonus activity %r for user %s has no readable duration; "
                     "not logged.",
@@ -295,13 +377,11 @@ class PhotoHandler:
             if dur < minimum:
                 # Below the minimum → do NOT log, do NOT award; short reply.
                 noun = _BELOW_MIN_NOUN[activity]
-                try:
-                    await message.reply_text(
-                        f"⚠️ {noun} is {dur} min — minimum is {minimum} min "
-                        f"to earn points."
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    logger.error("Failed to send below-minimum reply: %s", exc)
+                await _safe_reply(
+                    message,
+                    f"⚠️ {noun} is {dur} min — minimum is {minimum} min "
+                    f"to earn points.",
+                )
                 logger.info(
                     "Bonus activity %r for user %s is %d min (< %d min "
                     "minimum); not logged.",
@@ -351,13 +431,18 @@ class PhotoHandler:
         try:
             appended = await self._sheets.append_workout(row)
         except Exception as exc:
-            # The write ultimately failed (after retries). Logging is silent:
-            # log an ERROR (visible in Railway logs) but send NO chat message.
+            # The write ultimately failed (after retries). Log an ERROR (visible
+            # in Railway logs) and tell the poster so the submission is never
+            # dropped without a word.
             logger.error("Failed to append workout to Sheet: %s", exc)
             appended = False
 
         if not appended:
-            # Silent failure — observable via the ERROR log above only.
+            await _safe_reply(
+                message,
+                "⚠️ Couldn't save this workout just now — please send the "
+                "screenshot again in a few minutes.",
+            )
             return
 
         # 9) Success: INFO log first, then a chat reply confirming the activity.
@@ -372,12 +457,6 @@ class PhotoHandler:
 
         # The row is already safely written. Send the pre-computed plain-text
         # confirmation (no parse_mode to avoid Markdown/HTML injection via the
-        # name). The exact wording was chosen per-activity above.
-        try:
-            await message.reply_text(reply_text)
-        except TelegramError as exc:
-            # The log is already saved; a failed reply must not crash the
-            # handler or undo the write. Log and move on.
-            logger.error("Failed to send success reply: %s", exc)
-        except Exception as exc:  # pragma: no cover - defensive
-            logger.error("Unexpected error sending success reply: %s", exc)
+        # name). The exact wording was chosen per-activity above. A failed reply
+        # must not crash the handler or undo the write, hence _safe_reply.
+        await _safe_reply(message, reply_text)
