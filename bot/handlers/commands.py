@@ -30,7 +30,7 @@ from telegram.ext import ContextTypes
 from bot.config import Settings
 from bot.services.leaderboard import LeaderboardService
 from bot.services.sheets import SheetsService, check_sheets
-from bot.utils.dates import current_week_bounds
+from bot.utils.dates import current_week_bounds, previous_week_bounds
 from bot.utils.points import (
     DEFAULT_PLAN,
     MAX_PLAN,
@@ -49,6 +49,8 @@ _SETPLAN_USAGE = (
 _COACH_ONLY_MSG = "Only a coach can set or view another member's plan."
 _SETPLAN_COACH_ONLY_MSG = "Only your coach can set up workouts for you."
 _PAIRS_COACH_ONLY_MSG = "Only a coach can view the pairs leaderboard."
+# Accepted spellings of the /pairs argument selecting the PREVIOUS full week.
+_PAIRS_LAST_ARGS = frozenset({"last", "prev", "previous"})
 
 
 async def chatid_command(
@@ -483,13 +485,19 @@ async def myplan_command(
 async def pairs_command(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    """Reply with the CURRENT week's pairs leaderboard — COACHES ONLY.
+    """Reply with the pairs leaderboard — COACHES ONLY.
 
     Uses the same coach guard as ``/setplan`` (:meth:`Settings.is_coach`) and
-    the same aggregation/formatting as the scheduled Monday 09:00 pairs board,
-    but over the CURRENT (in-progress) Mon–Sun week so a coach can check
-    standings on demand. Intentionally NOT advertised in the public command
-    menu (like ``/setplan``).
+    the same aggregation/formatting as the scheduled Monday 09:00 pairs board.
+
+    - ``/pairs`` → the CURRENT (in-progress) Mon–Sun week, so a coach can check
+      standings on demand.
+    - ``/pairs last`` → the PREVIOUS full Mon–Sun week, i.e. the exact window the
+      scheduled Monday 09:00 board reports. Useful for re-checking or re-posting
+      that board after a late submission was accepted under the grace period (a
+      late row keeps its real ``workout_date``, so it belongs to this window).
+
+    Intentionally NOT advertised in the public command menu (like ``/setplan``).
     """
 
     message = update.effective_message
@@ -525,13 +533,26 @@ async def pairs_command(
             )
             return
 
-        start_date, end_date = current_week_bounds(settings.timezone)
+        # Optional "last" argument selects the previous full Mon–Sun week (the
+        # window the scheduled Monday 09:00 board reports); anything else — and
+        # no argument — keeps the default current-week behaviour.
+        args = getattr(context, "args", None) or []
+        want_previous = bool(args) and args[0].strip().lower() in _PAIRS_LAST_ARGS
+
+        if want_previous:
+            start_date, end_date = previous_week_bounds(settings.timezone)
+        else:
+            start_date, end_date = current_week_bounds(settings.timezone)
         entries = await leaderboard.aggregate_pairs(
             settings.pairs, start_date, end_date
         )
-        await _safe_reply(
-            message, leaderboard.format_pairs(entries, start_date, end_date)
-        )
+        text = leaderboard.format_pairs(entries, start_date, end_date)
+        if want_previous:
+            # Make the reported window explicit so a re-posted previous-week
+            # board can't be mistaken for the current one. The scheduled board's
+            # own text is untouched.
+            text = f"{text}\n\n({start_date} – {end_date})"
+        await _safe_reply(message, text)
     except Exception as exc:  # noqa: BLE001 - defensive: never fail silently
         logger.error("Unexpected error handling /pairs: %s", exc, exc_info=exc)
         await _safe_reply(

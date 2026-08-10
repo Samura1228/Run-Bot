@@ -390,7 +390,9 @@ Sam  - 20 points
 The coach pairs up chat members; each pair competes on their **combined** weekly
 points. The board is posted automatically every **Monday at 09:00** (five
 minutes before the individual board) and can be requested on demand by a coach
-with **`/pairs`** (which shows the **current**, in-progress week).
+with **`/pairs`** (which shows the **current**, in-progress week) or
+**`/pairs last`** (the **previous** full week — the same window the scheduled
+board reports).
 
 - **Configured via the `PAIRS` env var.** Pairs are separated by `,`, and the two
   Telegram user IDs within a pair are joined by `+`:
@@ -585,6 +587,14 @@ for you.` and does nothing. Coaches can set or view **other** members' plans.
   formatting as the scheduled Monday 09:00 board. Non-coaches get a short
   "coach only" message. Like `/setplan`, it is intentionally **not** advertised
   in the public command menu.
+- **`/pairs last`** — the same board for the **previous** full Mon–Sun week, i.e.
+  exactly the window the scheduled Monday 09:00 board reports. Use it to re-check
+  or re-post that board after a [late submission](#late-submission-grace-period)
+  was accepted (a late row keeps its real `workout_date`, so it belongs to that
+  week). The reported window is appended to the message (e.g.
+  `(2026-08-03 – 2026-08-09)`) so it can't be mistaken for the current week.
+  `prev` and `previous` work as aliases and the argument is case-insensitive; any
+  other argument falls back to the current week.
 
 ---
 ---
