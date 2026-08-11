@@ -16,7 +16,7 @@
 1. Joins a Telegram group and passively listens to all messages.
 2. On any **photo** message, downloads the image, hashes the raw bytes (dedup), and sends it to **Claude vision**.
 3. Claude returns a **strict JSON verdict** (is it a supported — Garmin **or** WHOOP — workout screenshot, completed, with a workout date, etc.).
-4. The bot applies **points/date-window logic**: if the workout date falls in the **accepted window** — the **current Mon–Sun week** (Europe/Nicosia), extended over the **just-finished** week while it is Monday before the `LATE_SUBMISSION_GRACE_UNTIL_HOUR` cutoff (default **09:00**, i.e. before the weekly boards post) → award points and log to Google Sheets (row written first, then an INFO log line), then reply in chat. A late-but-accepted row keeps its **real `workout_date`**, so it counts toward the week being reported. **Running** uses the user's **weekly plan** (see Section 5) and replies `✅ Nice run, {name}! +{points} points.`. **Walking/cycling/strength** award a flat **5 points** once their minimum duration is met and reply `✅ Nice {walk|ride|strength session}, {name}! +5 points.`; below their minimum duration the bot replies with a short warning and awards nothing. Anything else (outside the accepted window, non-Garmin, not completed, `other`) awards nothing but **still gets an explanatory reply** — submissions are **never silently dropped**; only a **duplicate** stays silent.
+4. The bot applies **points/date-window logic**: if the workout date falls in the **accepted window** — the **current Mon–Sun week** (Europe/Nicosia), extended over the **just-finished** week while it is Monday before the `LATE_SUBMISSION_GRACE_UNTIL_HOUR` cutoff (default **09:00**, i.e. before the weekly boards post) → award points and log to Google Sheets (row written first, then an INFO log line), then reply in chat. A late-but-accepted row keeps its **real `workout_date`**, so it counts toward the week being reported. **Running** uses the user's **weekly plan** (see Section 5) and replies `✅ Nice run, {name}! +{points} points.`. **Walking/cycling/strength** award a flat **5 points** once their minimum duration is met and reply `✅ Nice {walk|ride|strength session}, {name}! +5 points.`; below their minimum duration the bot replies with a short warning and awards nothing. A photo that is **NOT a Garmin/WHOOP screenshot at all** (nature photo, meme, another app) is ignored in **complete silence** so the group is never spammed; a photo that IS a tracker screenshot but earns nothing still gets a short explanatory reply (see Section 5).
 5. An **APScheduler** (AsyncIOScheduler, timezone `Europe/Nicosia`) runs on the same event loop and posts a **weekly pairs leaderboard** (Monday 09:00), a **weekly individual leaderboard** (Monday 09:05) and a **monthly leaderboard** (1st of month 09:00). Both weekly jobs perform the (idempotent) **streak rollover** first, so streak bonuses are included in whichever board posts first.
 6. **Google Sheets is the single source of truth.** Leaderboards are computed by reading and aggregating the sheet, so restarts lose no data.
 
@@ -32,8 +32,10 @@ flowchart TD
     DEDUP -->|duplicate| IGN1[Silently ignore]
     DEDUP -->|new| VIS[Claude Vision Service]
     VIS --> VER[Parse & validate JSON verdict]
-    VER --> DEC{Decision:<br/>Garmin + running +<br/>completed + in accepted window?<br/>(current week, or previous week<br/>on Mon before 09:00)}
-    DEC -->|no / low confidence / parse fail| IGN2[No points +<br/>explanatory reply]
+    VER --> SRC{Garmin/WHOOP<br/>screenshot at all?}
+    SRC -->|no / low confidence / parse fail| IGN2[Silently ignore<br/>ordinary photos]
+    SRC -->|yes| DEC{Decision:<br/>running/walking/cycling/strength +<br/>completed + in accepted window?<br/>(current week, or previous week<br/>on Mon before 09:00)}
+    DEC -->|no| REJ[No points +<br/>explanatory reply]
     DEC -->|yes| AWARD[Award plan-based points]
     AWARD --> SHEET[(Google Sheet<br/>source of truth)]
     AWARD --> LOG[INFO log + chat reply<br/>after Sheet write]
@@ -374,7 +376,7 @@ type — the handler branches on `activity_type` after this gate:
 - `activity_type == "running"` → plan-based points (Section 5).
 - `activity_type in {"walking", "cycling", "strength"}` → flat 5-point bonus,
   subject to the per-activity minimum duration (Section 5).
-- anything else (`other`/legacy) → **no points**, and the bot replies `⚠️ This activity type doesn't earn points. Points are awarded for running, walking, cycling and strength workouts.`
+- anything else (`other`/legacy) → **no points**. If the image was a Garmin/WHOOP screenshot the bot replies `⚠️ This activity type doesn't earn points. Points are awarded for running, walking, cycling and strength workouts.`; if it was not a tracker screenshot at all (`is_garmin=false`) it is ignored silently — see Section 5.
 
 If gated-in, proceed to the date-window/points decision (Section 5). Otherwise IGNORE.
 
@@ -492,44 +494,75 @@ Per-activity minimum duration & reply behaviour (uses the vision
   **not** log/award.
 - The below-minimum and no-duration cases reply while NOT logging. Every other
   non-eligible path (outside the accepted window, non-Garmin, not completed,
-  `other`) **also replies now** — see
-  [No silent drops](#no-silent-drops-every-rejection-replies). Only a
-  **duplicate** re-submission stays silent.
+  `other`) **also replies now**, provided the image really is a Garmin/WHOOP
+  screenshot — see
+  [Reply policy](#reply-policy-silent-on-non-tracker-photos-explain-real-rejections).
+  Non-tracker photos and duplicates stay silent.
 - Qualifying bonus rows are written to `Log` (with the correct `activity_type`
   and `points = 5`) via the same write-first + retry + dedup-recheck path as
   running, and **count in the weekly/monthly leaderboards** (the aggregation
   sums all rows in range regardless of `activity_type`).
 
-### No silent drops (every rejection replies)
+### Reply policy (silent on non-tracker photos, explain real rejections)
 
-A submission is **never** ignored without feedback. Every path in
-[`bot/handlers/photo.py`](bot/handlers/photo.py) that awards no points sends a
-short, non-technical reply through the module-local `_safe_reply()` helper (same
-contract as the one in [`bot/handlers/commands.py`](bot/handlers/commands.py): it
-swallows and logs `TelegramError`, so a failed send can never crash the handler
-or undo a confirmed Sheet write).
+The group shares ordinary photos constantly, so replying to *every* rejected
+photo turned the bot into a spam source (three holiday snaps → three
+"couldn't confirm a workout" warnings). Replies are therefore gated on the
+vision contract's supported-source flag **`verdict.is_garmin`** (true for Garmin
+Connect OR WHOOP; false when the image is from a different app or is not a
+workout screenshot at all — see Section 4).
+
+**The `is_garmin` gate runs immediately after the vision call**, before any other
+rejection path, so every reply below it is guaranteed to reach someone who really
+did post a tracker screenshot.
+
+Replies go through the module-local `_safe_reply()` helper (same contract as the
+one in [`bot/handlers/commands.py`](bot/handlers/commands.py): it swallows and
+logs `TelegramError`, so a failed send can never crash the handler or undo a
+confirmed Sheet write).
+
+**Silent (log only) — we cannot be sure the poster was even trying to log a workout:**
+
+| Path | Rationale |
+|------|-----------|
+| `verdict.is_garmin == false` — nature photo, meme, selfie, or another app (Strava, Nike Run Club, Apple Fitness…) | Not a submission at all; warning would be noise. |
+| Vision returned no usable verdict (parse/API failure) | We can't tell whether it was a tracker screenshot, so assume it wasn't. |
+| `confidence < MIN_CONFIDENCE` | "Barely recognizable" is not a reliable basis for telling someone their screenshot is wrong. |
+| **Duplicate** re-submission | Intentionally silent (pre-existing behaviour). |
+
+**Replies — the image IS a Garmin/WHOOP screenshot, so the poster deserves to know why it scored nothing:**
 
 | Path | Reply |
 |------|-------|
 | Workout date outside the accepted window | `⚠️ This workout is dated {date}, which is outside the week we're currently counting. Points can only be added for the current week.` |
-| Vision returned no usable verdict (parse/API failure) | `⚠️ Couldn't read this screenshot — no points awarded. Please try again with a clear workout summary screenshot.` |
-| Verdict not eligible (unsupported app, not completed, low confidence) | `⚠️ Couldn't confirm a completed workout in this screenshot — no points awarded. Please send the workout summary screenshot from Garmin or WHOOP.` |
-| Activity type not awardable (`other`, swimming, unrecognized) | `⚠️ This activity type doesn't earn points. Points are awarded for running, walking, cycling and strength workouts.` |
+| Not eligible for another reason (not completed) at or above the confidence threshold | `⚠️ Couldn't confirm a completed workout in this screenshot — no points awarded. Please send the workout summary screenshot from Garmin or WHOOP.` |
+| Activity type not awardable (swimming, `other`) | `⚠️ This activity type doesn't earn points. Points are awarded for running, walking, cycling and strength workouts.` |
 | `workout_date` unparseable after validation | `⚠️ Couldn't read the workout date — no points awarded.` |
 | Sheet append failed after retries | `⚠️ Couldn't save this workout just now — please send the screenshot again in a few minutes.` |
 | Summary/achievements screen (**unchanged text**) | `⚠️ This looks like a summary/achievements screen, not a completed workout. Please send the workout summary screenshot from Garmin or WHOOP.` |
 | Bonus activity, unreadable duration (**unchanged text**) | `⚠️ Couldn't read the duration — no points awarded.` |
 | Bonus activity below minimum (**unchanged text**) | `⚠️ {Noun} is {dur} min — minimum is {minimum} min to earn points.` |
-| **Duplicate** re-submission | *(intentionally silent — by design)* |
+
+Every decision — silent or not — is still logged at INFO, so an ignored photo
+remains fully observable in the Railway logs.
 
 ### Decision Pseudocode
 
 ```
 function decide_and_process(message, verdict, image_hash):
-    # shared gating (Section 4): Garmin + completed + valid date + confidence
-    if not (verdict.is_garmin and verdict.is_completed
-            and verdict.workout_date is not None
-            and verdict.confidence >= MIN_CONFIDENCE):
+    # SOURCE GATE FIRST: is this a Garmin/WHOOP screenshot at all? A nature
+    # photo, meme or another app's screenshot is ignored in SILENCE so the group
+    # is never spammed. Every reply below is therefore only ever sent to someone
+    # who really did post a tracker screenshot.
+    if not verdict.is_garmin:
+        return IGNORE   # silent, log only
+
+    # A barely-recognizable image is also not a reliable basis for a warning.
+    if verdict.confidence < MIN_CONFIDENCE:
+        return IGNORE   # silent, log only
+
+    # shared gating (Section 4): completed + valid date
+    if not (verdict.is_completed and verdict.workout_date is not None):
         reply("⚠️ Couldn't confirm a completed workout ...")
         return REJECT
 
@@ -584,7 +617,7 @@ function decide_and_process(message, verdict, image_hash):
 ```
 
 
-**Write-first, then reply:** on success the row is written to the Sheet and an INFO log line `Logged workout: user=... date=... points=<computed>` is emitted; **only after** the confirmed write does the bot reply in chat with `✅ Nice run, {name}! +{points} points.`. A failed reply is logged but never undoes the saved row. Rejections and failures now reply too (see [No silent drops](#no-silent-drops-every-rejection-replies)); only duplicates stay silent. (Weekly/monthly leaderboards are still posted to the group.)
+**Write-first, then reply:** on success the row is written to the Sheet and an INFO log line `Logged workout: user=... date=... points=<computed>` is emitted; **only after** the confirmed write does the bot reply in chat with `✅ Nice run, {name}! +{points} points.`. A failed reply is logged but never undoes the saved row. Rejected Garmin/WHOOP screenshots get an explanatory reply, while non-tracker photos, unreadable/low-confidence images and duplicates stay silent (see [Reply policy](#reply-policy-silent-on-non-tracker-photos-explain-real-rejections)). (Weekly/monthly leaderboards are still posted to the group.)
 
 ### Streak Bonus (weekly rollover)
 
@@ -836,12 +869,13 @@ tzdata>=2024.1
 |------|----------|
 | **Duplicate submission** (same user + same image hash) | Rejected silently. Dedup lookup runs **before** the (costly) vision call; a second race-safe check runs before append. |
 | **Non-photo messages** | Ignored by handler filter (`filters.PHOTO`). |
-| **Photo but not Garmin/WHOOP / unsupported activity / planned only** | Vision verdict fails eligibility → no points, and the bot replies `⚠️ Couldn't confirm a completed workout in this screenshot — no points awarded. Please send the workout summary screenshot from Garmin or WHOOP.` |
+| **Ordinary photo — nature/selfie/meme/food, or another app (Strava, Nike Run Club, Apple Fitness)** | `is_garmin=false` → **silently ignored** (log only, NO reply), so sharing normal photos never spams the group. |
+| **Garmin/WHOOP screenshot but not a completed workout / unsupported activity / planned only** | No points, and the bot replies `⚠️ Couldn't confirm a completed workout in this screenshot — no points awarded. Please send the workout summary screenshot from Garmin or WHOOP.` |
 | **Garmin achievements/badges screen or WHOOP daily overview (Strain/Recovery/Sleep/Health Monitor/coach card)** | `is_achievement=true` → not eligible; the bot replies `⚠️ This looks like a summary/achievements screen, not a completed workout. Please send the workout summary screenshot from Garmin or WHOOP.` and awards nothing. |
 | **WHOOP workout with no distance/pace/map** | Normal for WHOOP — accepted on the `ACTIVITY STRAIN` + `DURATION H:MM:SS` + `ZONE n … BPM` markers; scored exactly like Garmin. |
 | **Workout dated in the just-finished week, submitted Monday before `LATE_SUBMISSION_GRACE_UNTIL_HOUR`** | **Accepted and scored** (grace period, Section 5). The row keeps its real `workout_date`, and running points count it against that previous week. |
 | **Workout older than the accepted window** (e.g. previous week submitted Mon 09:30 or later, or on any other day) | No log, no points; the bot replies `⚠️ This workout is dated {date}, which is outside the week we're currently counting. Points can only be added for the current week.` |
-| **Low confidence** (`< MIN_CONFIDENCE`) | No points; replies with the "couldn't confirm a completed workout" message above. |
+| **Low confidence** (`< MIN_CONFIDENCE`) | **Silently ignored** (log only): a barely-recognizable image is not a reliable basis for telling someone their screenshot was wrong. |
 | **Claude JSON parse failure** | Fallback substring extraction; if still invalid → ignore + warning log. |
 | **Claude API error / timeout / rate limit** | Optional single retry with backoff; on final failure → ignore + warning log. No user-facing error to avoid group spam. |
 | **Malformed / corrupt image bytes** | If download or base64 encoding fails → ignore + warning log. |
@@ -874,8 +908,8 @@ sequenceDiagram
         B->>C: image + prompt (return JSON only)
         C-->>B: JSON verdict
         B->>B: parse + validate (schema, confidence)
-        alt not eligible / low confidence / parse fail
-            B-->>U: (silent, no reply)
+        alt not a Garmin/WHOOP screenshot / low confidence / parse fail
+            B-->>U: (silent, no reply — ordinary photos are ignored)
         else eligible + workout_date in current Mon–Sun week
             B->>S: append_row (10 pts, running, ...)
             B->>B: INFO log (after confirmed write)

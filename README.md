@@ -20,12 +20,13 @@ whenever someone posts a **photo**, it:
      minimum it replies with a short warning and awards nothing. These are
      **separate bonus points** — they don't affect the running plan or streak.
 
-   Otherwise (outside the counted window, unsupported app, not completed,
-   unrecognized) it awards nothing but **always replies with a short reason** —
-   a submission is **never silently dropped**. A **summary screen** (Garmin
-   achievements/badges or a WHOOP daily overview) gets a short warning reply and
-   no points. The only intentionally silent case is a **duplicate**
-   re-submission of the same screenshot.
+   **Ordinary photos are ignored completely** — post holiday snaps, memes or
+   anything that isn't a Garmin/WHOOP screenshot and the bot says **nothing**, so
+   the group is never spammed. But if you *did* post a real Garmin/WHOOP
+   screenshot that earns no points (wrong week, below the minimum duration, a
+   **summary/achievements screen**, unreadable duration), it replies with a short
+   reason so you're not left guessing. Full breakdown:
+   [When the bot replies](#when-the-bot-replies).
 
    A workout dated in the **just-finished week** is still accepted on **Monday
    before 09:00** (the [late-submission grace
@@ -497,21 +498,37 @@ or, on Monday before 09:00, the **just-finished** week (see
 WHOOP), the **date you posted it** is used. Bonus activities additionally require
 their minimum duration.
 
-**Nothing is silently dropped.** Every path that awards no points now sends a
-short, friendly reply:
+### When the bot replies
+
+The bot only speaks up when the photo is **actually a Garmin or WHOOP
+screenshot**. Everything else is ignored in complete silence, so sharing ordinary
+photos in the group never triggers a single bot message.
+
+**🔇 Completely silent — no reply at all:**
+
+| Situation |
+| --- |
+| **Not a Garmin/WHOOP screenshot** — nature photos, selfies, memes, food, screenshots from other apps (Strava, Nike Run Club, Apple Fitness…) |
+| Screenshot too unclear/unreadable for the bot to identify |
+| Recognized as a workout only with **low confidence** (below `MIN_CONFIDENCE`) |
+| **Duplicate** re-submission of a screenshot already logged |
+
+**💬 Replies with a short reason** — only for real Garmin/WHOOP screenshots, so
+someone who genuinely logged a workout always learns why it scored nothing:
 
 | Situation | Reply |
 | --- | --- |
 | Dated outside the counted window | `⚠️ This workout is dated {date}, which is outside the week we're currently counting. Points can only be added for the current week.` |
-| Screenshot unreadable by the vision step | `⚠️ Couldn't read this screenshot — no points awarded. Please try again with a clear workout summary screenshot.` |
-| No completed workout confirmed (unsupported app, not completed, low confidence) | `⚠️ Couldn't confirm a completed workout in this screenshot — no points awarded. Please send the workout summary screenshot from Garmin or WHOOP.` |
-| Activity type that earns nothing (e.g. `other`/swimming) | `⚠️ This activity type doesn't earn points. Points are awarded for running, walking, cycling and strength workouts.` |
+| Recognized as Garmin/WHOOP but no completed workout confirmed | `⚠️ Couldn't confirm a completed workout in this screenshot — no points awarded. Please send the workout summary screenshot from Garmin or WHOOP.` |
+| Activity type that earns nothing (e.g. swimming) | `⚠️ This activity type doesn't earn points. Points are awarded for running, walking, cycling and strength workouts.` |
 | Workout date couldn't be parsed | `⚠️ Couldn't read the workout date — no points awarded.` |
 | Summary/achievements screen | `⚠️ This looks like a summary/achievements screen, not a completed workout. Please send the workout summary screenshot from Garmin or WHOOP.` |
+| Bonus activity, duration unreadable | `⚠️ Couldn't read the duration — no points awarded.` |
+| Bonus activity below its minimum duration | `⚠️ {Walk\|Ride\|Strength/stretch} is {N} min — minimum is {M} min to earn points.` |
 | Sheet write failed after retries | `⚠️ Couldn't save this workout just now — please send the screenshot again in a few minutes.` |
 
-The one intentional exception is a **duplicate** re-submission of the same
-screenshot, which stays silent by design.
+Every rejection is logged either way, so a silently-ignored photo is still
+visible in the Railway logs.
 
 ## Diagnostics
 

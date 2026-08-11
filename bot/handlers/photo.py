@@ -15,10 +15,19 @@ REAL ``workout_date`` and is scored against the week that date belongs to.
 
 On a successful, eligible run the row is written to the Google Sheet FIRST; once
 the write is confirmed and the INFO log is emitted, the bot replies to the chat
-with "✅ Nice run, {name}! +{points} points.". Rejections are never silent: every
-path that declines to award points sends a short, friendly explanation via
-:func:`_safe_reply` (the only exception is a duplicate re-submission, which stays
-silent by design), and all decisions remain observable via logs.
+with "✅ Nice run, {name}! +{points} points.".
+
+Replies are gated on whether the image is a supported tracker screenshot at all
+(``verdict.is_garmin``), so the group is never spammed about ordinary photos:
+
+* NOT a Garmin/WHOOP screenshot (holiday snap, meme, another app), an unusable
+  vision verdict, a low-confidence verdict, or a duplicate re-submission →
+  **completely silent**, observable via logs only.
+* IS a Garmin/WHOOP screenshot but earns no points (outside the counted week,
+  below the minimum duration, summary/achievements screen, unreadable duration
+  or date, failed Sheet write) → a short, friendly explanation via
+  :func:`_safe_reply`, so someone who really did post a workout is never left
+  guessing.
 """
 
 from __future__ import annotations
@@ -157,16 +166,32 @@ class PhotoHandler:
         # 4) Vision analysis.
         verdict = await self._vision.analyze(image_bytes)
         if verdict is None:
-            # Parse/API/validation failure → tell the poster rather than drop
-            # the submission silently.
+            # Parse/API/validation failure: we cannot tell whether this was even
+            # a tracker screenshot, so stay SILENT rather than warn about an
+            # ordinary photo. Observable via this log line only.
             logger.info(
-                "Vision analysis returned no usable verdict for user %s.",
+                "Vision analysis returned no usable verdict for user %s; "
+                "ignoring silently.",
                 user.id,
             )
-            await _safe_reply(
-                message,
-                "⚠️ Couldn't read this screenshot — no points awarded. Please "
-                "try again with a clear workout summary screenshot.",
+            return
+
+        # 4b) Not a supported tracker screenshot at all (holiday snap, meme,
+        # a photo of the road, another app...) → stay COMPLETELY SILENT. The
+        # group shares ordinary photos all the time and must not be spammed with
+        # "couldn't confirm a workout" warnings. ``is_garmin`` is the vision
+        # contract's supported-source flag (true for Garmin Connect OR WHOOP);
+        # it is false precisely when the image is from a different app or is not
+        # a workout screenshot at all. Every reply below this point therefore
+        # only ever goes to someone who really did post a Garmin/WHOOP screen.
+        if not verdict.is_garmin:
+            logger.info(
+                "Photo from user %s is not a Garmin/WHOOP screenshot "
+                "(source=%s type=%s conf=%.2f); ignoring silently.",
+                user.id,
+                verdict.source,
+                verdict.activity_type,
+                verdict.confidence,
             )
             return
 
@@ -211,24 +236,31 @@ class PhotoHandler:
                 update={"workout_date": fallback.isoformat()}
             )
 
-        # 5b) Eligibility.
+        # 5b) Eligibility. Reaching here means it IS a Garmin/WHOOP screenshot
+        # (gate 4b above), so a reply is warranted: the poster tried to log a
+        # workout and deserves to know why it earned nothing. A low-confidence
+        # verdict stays silent, since "barely recognizable" is not a reliable
+        # basis for telling someone their screenshot was wrong.
         if not verdict.is_eligible(self._settings.min_confidence):
+            low_confidence = verdict.confidence < self._settings.min_confidence
             logger.info(
                 "Verdict not eligible (supported=%s source=%s type=%s "
-                "completed=%s date=%s conf=%.2f); rejecting.",
+                "completed=%s date=%s conf=%.2f); rejecting%s.",
                 verdict.is_garmin,
                 verdict.source,
                 verdict.activity_type,
                 verdict.is_completed,
                 verdict.workout_date,
                 verdict.confidence,
+                " silently (low confidence)" if low_confidence else "",
             )
-            await _safe_reply(
-                message,
-                "⚠️ Couldn't confirm a completed workout in this screenshot — "
-                "no points awarded. Please send the workout summary screenshot "
-                "from Garmin or WHOOP.",
-            )
+            if not low_confidence:
+                await _safe_reply(
+                    message,
+                    "⚠️ Couldn't confirm a completed workout in this screenshot "
+                    "— no points awarded. Please send the workout summary "
+                    "screenshot from Garmin or WHOOP.",
+                )
             return
 
         # Gate: only awardable activity types proceed. Running uses the
