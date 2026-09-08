@@ -15,7 +15,9 @@ REAL ``workout_date`` and is scored against the week that date belongs to.
 
 On a successful, eligible run the row is written to the Google Sheet FIRST; once
 the write is confirmed and the INFO log is emitted, the bot replies to the chat
-with "✅ Nice run, {name}! +{points} points.".
+with "✅ Nice run, {name}! +{points} points. //total week = {total} points"
+— the trailing total being the user's points for the week that workout belongs
+to, read back after the write so it includes the points just awarded.
 
 Replies are gated on whether the image is a supported tracker screenshot at all
 (``verdict.is_garmin``), so the group is never spammed about ordinary photos:
@@ -486,6 +488,26 @@ class PhotoHandler:
             activity,
             points,
         )
+
+        # Weekly running total appended to the confirmation: the user's points
+        # for the week THIS workout belongs to (running + bonus activities +
+        # any streak bonus), read back AFTER the row was written so it already
+        # includes the points just awarded, and matching what the weekly
+        # leaderboard will show. Best-effort: if the read fails, the base
+        # confirmation still goes out without the total.
+        try:
+            week_total = await self._sheets.sum_user_points_in_range(
+                user.id, week_start, week_end
+            )
+        except Exception as exc:
+            logger.error(
+                "Failed to read the weekly total for user %s (reply sent "
+                "without it): %s",
+                user.id,
+                exc,
+            )
+        else:
+            reply_text += f" //total week = {format_points(week_total)} points"
 
         # The row is already safely written. Send the pre-computed plain-text
         # confirmation (no parse_mode to avoid Markdown/HTML injection via the

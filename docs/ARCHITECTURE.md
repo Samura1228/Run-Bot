@@ -16,7 +16,7 @@
 1. Joins a Telegram group and passively listens to all messages.
 2. On any **photo** message, downloads the image, hashes the raw bytes (dedup), and sends it to **Claude vision**.
 3. Claude returns a **strict JSON verdict** (is it a supported — Garmin **or** WHOOP — workout screenshot, completed, with a workout date, etc.).
-4. The bot applies **points/date-window logic**: if the workout date falls in the **accepted window** — the **current Mon–Sun week** (Europe/Nicosia), extended over the **just-finished** week while it is Monday before the `LATE_SUBMISSION_GRACE_UNTIL_HOUR` cutoff (default **09:00**, i.e. before the weekly boards post) → award points and log to Google Sheets (row written first, then an INFO log line), then reply in chat. A late-but-accepted row keeps its **real `workout_date`**, so it counts toward the week being reported. **Running** uses the user's **weekly plan** (see Section 5) and replies `✅ Nice run, {name}! +{points} points.`. **Walking/cycling/strength** award a flat **5 points** once their minimum duration is met and reply `✅ Nice {walk|ride|strength session}, {name}! +5 points.`; below their minimum duration the bot replies with a short warning and awards nothing. A photo that is **NOT a Garmin/WHOOP screenshot at all** (nature photo, meme, another app) is ignored in **complete silence** so the group is never spammed; a photo that IS a tracker screenshot but earns nothing still gets a short explanatory reply (see Section 5).
+4. The bot applies **points/date-window logic**: if the workout date falls in the **accepted window** — the **current Mon–Sun week** (Europe/Nicosia), extended over the **just-finished** week while it is Monday before the `LATE_SUBMISSION_GRACE_UNTIL_HOUR` cutoff (default **09:00**, i.e. before the weekly boards post) → award points and log to Google Sheets (row written first, then an INFO log line), then reply in chat. A late-but-accepted row keeps its **real `workout_date`**, so it counts toward the week being reported. **Running** uses the user's **weekly plan** (see Section 5) and replies `✅ Nice run, {name}! +{points} points. //total week = {total} points`. **Walking/cycling/strength** award a flat **5 points** once their minimum duration is met and reply `✅ Nice {walk|ride|strength session}, {name}! +5 points. //total week = {total} points`; below their minimum duration the bot replies with a short warning and awards nothing. A photo that is **NOT a Garmin/WHOOP screenshot at all** (nature photo, meme, another app) is ignored in **complete silence** so the group is never spammed; a photo that IS a tracker screenshot but earns nothing still gets a short explanatory reply (see Section 5).
 5. An **APScheduler** (AsyncIOScheduler, timezone `Europe/Nicosia`) runs on the same event loop and posts a **weekly pairs leaderboard** (Monday 09:00), a **weekly individual leaderboard** (Monday 09:05) and a **monthly leaderboard** (1st of month 09:00). Both weekly jobs perform the (idempotent) **streak rollover** first, so streak bonuses are included in whichever board posts first.
 6. **Google Sheets is the single source of truth.** Leaderboards are computed by reading and aggregating the sheet, so restarts lose no data.
 
@@ -105,7 +105,7 @@ run-bot/
 | [`bot/main.py`](bot/main.py) | Application entry point; wires config, services, handlers, scheduler; starts long-polling. |
 | [`bot/config.py`](bot/config.py) | Read & validate all environment variables; expose a typed `Settings` singleton. |
 | [`bot/models.py`](bot/models.py) | Typed data models: `VisionVerdict`, `WorkoutLogRow`, `LeaderboardEntry`, `PairEntry` (a pair's combined total + both member labels). |
-| [`bot/handlers/photo.py`](bot/handlers/photo.py) | End-to-end photo pipeline orchestration; writes to the Sheet first, then replies `✅ Nice run, {name}! +{points} points.`. |
+| [`bot/handlers/photo.py`](bot/handlers/photo.py) | End-to-end photo pipeline orchestration; writes to the Sheet first, then replies `✅ Nice run, {name}! +{points} points. //total week = {total} points`. |
 | [`bot/services/vision.py`](bot/services/vision.py) | Call Claude vision; enforce strict JSON schema; return validated `VisionVerdict`. |
 | [`bot/services/sheets.py`](bot/services/sheets.py) | All Google Sheets I/O: dedup lookup, append row, read range for aggregation. |
 | [`bot/services/scheduler.py`](bot/services/scheduler.py) | Configure & start `AsyncIOScheduler` cron triggers on the PTB loop. |
@@ -485,9 +485,9 @@ Per-activity minimum duration & reply behaviour (uses the vision
 
 | Activity | Minimum | On/above minimum (flat 5) | Below minimum (no log, no points) | `activity_label` |
 |----------|:-------:|---------------------------|-----------------------------------|------------------|
-| walking | 40 min | `✅ Nice walk, {name}! +5 points.` | `⚠️ Walk is {dur} min — minimum is 40 min to earn points.` | `walk` |
-| cycling | 60 min | `✅ Nice ride, {name}! +5 points.` | `⚠️ Ride is {dur} min — minimum is 60 min to earn points.` | `ride` |
-| strength | 15 min | `✅ Nice strength session, {name}! +5 points.` | `⚠️ Strength/stretch is {dur} min — minimum is 15 min to earn points.` | `strength session` |
+| walking | 40 min | `✅ Nice walk, {name}! +5 points. //total week = {total} points` | `⚠️ Walk is {dur} min — minimum is 40 min to earn points.` | `walk` |
+| cycling | 60 min | `✅ Nice ride, {name}! +5 points. //total week = {total} points` | `⚠️ Ride is {dur} min — minimum is 60 min to earn points.` | `ride` |
+| strength | 15 min | `✅ Nice strength session, {name}! +5 points. //total week = {total} points` | `⚠️ Strength/stretch is {dur} min — minimum is 15 min to earn points.` | `strength session` |
 
 - If `duration_minutes` is `null` (couldn't be read) for a bonus activity, the
   bot replies `⚠️ Couldn't read the duration — no points awarded.` and does
@@ -596,6 +596,8 @@ function decide_and_process(message, verdict, image_hash):
         so_far = sheets.count_user_workouts_in_week(user_id, week_start, week_end)
         points = workout_points(plan, so_far)              # plan-based value
         reply = f"✅ Nice run, {name}! +{format_points(points)} points."
+        # ... after the confirmed Sheet write the week total is appended:
+        reply += f" //total week = {format_points(week_total)} points"
     else:   # walking / cycling / strength — flat bonus, separate from the plan
         dur = verdict.duration_minutes
         if dur is None:
@@ -606,6 +608,7 @@ function decide_and_process(message, verdict, image_hash):
             return NO_LOG        # no log, no points
         points = BONUS_ACTIVITY_POINTS                     # flat 5
         reply = f"✅ Nice {activity_label(activity)}, {name}! +5 points."
+        # ... the same " //total week = N points" suffix is appended after the write
 
     # The row keeps verdict.workout_date VERBATIM — a late submission is never
     # shifted into the new week.
@@ -617,7 +620,7 @@ function decide_and_process(message, verdict, image_hash):
 ```
 
 
-**Write-first, then reply:** on success the row is written to the Sheet and an INFO log line `Logged workout: user=... date=... points=<computed>` is emitted; **only after** the confirmed write does the bot reply in chat with `✅ Nice run, {name}! +{points} points.`. A failed reply is logged but never undoes the saved row. Rejected Garmin/WHOOP screenshots get an explanatory reply, while non-tracker photos, unreadable/low-confidence images and duplicates stay silent (see [Reply policy](#reply-policy-silent-on-non-tracker-photos-explain-real-rejections)). (Weekly/monthly leaderboards are still posted to the group.)
+**Write-first, then reply:** on success the row is written to the Sheet and an INFO log line `Logged workout: user=... date=... points=<computed>` is emitted; **only after** the confirmed write does the bot reply in chat with `✅ Nice run, {name}! +{points} points. //total week = {total} points`, where the total is that user's points for the week the workout belongs to (running + bonus activities + any streak bonus), re-read from the Sheet after the write so it already includes the points just awarded. If that read fails the confirmation is still sent, just without the total. A failed reply is logged but never undoes the saved row. Rejected Garmin/WHOOP screenshots get an explanatory reply, while non-tracker photos, unreadable/low-confidence images and duplicates stay silent (see [Reply policy](#reply-policy-silent-on-non-tracker-photos-explain-real-rejections)). (Weekly/monthly leaderboards are still posted to the group.)
 
 ### Streak Bonus (weekly rollover)
 
@@ -913,10 +916,10 @@ sequenceDiagram
         else eligible + workout_date in current Mon–Sun week
             B->>S: append_row (10 pts, running, ...)
             B->>B: INFO log (after confirmed write)
-            B-->>U: ✅ Nice run, {name}! +{points} points.
+            B-->>U: ✅ Nice run, {name}! +{points} points. //total week = {total} points
         else eligible, previous week, Monday before the grace cutoff
             B->>S: append row (real workout_date, previous week)
-            B-->>U: ✅ Nice run, {name}! +{points} points.
+            B-->>U: ✅ Nice run, {name}! +{points} points. //total week = {total} points
         else eligible but outside the accepted window
             B-->>U: ⚠️ This workout is dated {date}, which is outside the week we're currently counting.
         end

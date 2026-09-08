@@ -13,10 +13,11 @@ whenever someone posts a **photo**, it:
    time), it awards points and logs to a **Google Sheet** (the row is written
    first), then replies in chat:
    - **Running** → **plan-based points** (see [Points & plans](#points--plans)):
-     `✅ Nice run, {name}! +{points} points.`
+     `✅ Nice run, {name}! +{points} points. //total week = {total} points`
    - **Walking / cycling / strength** → a flat **5 points** once a minimum
      duration is met (walking ≥ 40 min, cycling ≥ 60 min, strength/stretch ≥ 15
-     min): `✅ Nice {walk|ride|strength session}, {name}! +5 points.`. Below the
+     min): `✅ Nice {walk|ride|strength session}, {name}! +5 points. //total week = {total} points`.
+     Below the
      minimum it replies with a short warning and awards nothing. These are
      **separate bonus points** — they don't affect the running plan or streak.
 
@@ -280,7 +281,7 @@ initialized ...`, and `Bot started; scheduler running.` Post a Garmin or WHOOP
 running screenshot in the group to test — for a valid, current-week run a new row is
 written to the sheet first, an INFO log line `Logged workout: ...` appears in
 the Railway logs, and the bot then replies in chat with
-`✅ Nice run, {name}! +{points} points.`.
+`✅ Nice run, {name}! +{points} points. //total week = {total} points`.
 
 > The `.env` file is git-ignored. Never commit real credentials.
 
@@ -322,9 +323,10 @@ Run Bot uses **long-polling**, so it runs as a **worker** (no HTTP port).
 ## How the leaderboards work
 
 - Times are in **Europe/Nicosia** (Cyprus). Change with `TIMEZONE` if needed.
-- **Weekly pairs (Mon 09:00):** posts the **pairs** board — each configured pair's
-  **combined** points for the **previous** Monday–Sunday week (see
-  [Pairs leaderboard](#pairs-leaderboard) below).
+- **Pairs round board (daily 09:00 check):** posts each pair's **combined**
+  points — but **only** on the morning after a coach-created round has ended
+  (see [Pairs leaderboard](#pairs-leaderboard) below). A round finishing Sunday
+  is reported Monday 09:00. With no active round, nothing is posted at all.
 - **Weekly individual (Mon 09:05):** first awards **streak bonuses** for the
   previous week (so they show up in the board), then posts individual totals for
   the **previous** Monday–Sunday week.
@@ -388,31 +390,73 @@ Sam  - 20 points
 
 ### Pairs leaderboard
 
-The coach pairs up chat members; each pair competes on their **combined** weekly
-points. The board is posted automatically every **Monday at 09:00** (five
-minutes before the individual board) and can be requested on demand by a coach
-with **`/pairs`** (which shows the **current**, in-progress week) or
-**`/pairs last`** (the **previous** full week — the same window the scheduled
-board reports).
+Pairs run as **time-boxed rounds** that a coach starts on demand. A round has an
+explicit start and end date; the bot counts those pairs' **combined** points
+**only while the round is running**. When it ends, the final board is posted and
+the bot **stops tracking pairs entirely** until the coach starts a new round.
 
-- **Configured via the `PAIRS` env var.** Pairs are separated by `,`, and the two
-  Telegram user IDs within a pair are joined by `+`:
+> **Nothing is tracked by default.** If no round is active there is no pairs
+> board, no scheduled post and no calculation — the feature is opt-in per round.
+
+#### Starting a round
+
+```
+/setpairs 1w @artquite+@MaksYezhovv @Mak1225+@Elena
+```
+
+- **First argument = how long it lasts:** `1w`, `2w`, `10d`, `3 days`… (1–365
+  days). `1w` = **7 whole days**.
+- **Each remaining argument = one pair**, two people joined by `+`. Members can
+  be `@username` (resolved from the sheet — they must have posted at least once,
+  or use `/whoami`) or a raw numeric ID.
+- The round **starts today** and counts **whole calendar days**, because
+  workouts are stored with a date and no time. Starting `1w` on Monday 7 Sep
+  counts workouts dated **7–13 Sep inclusive**.
+- The bot confirms with the exact window and when the final board will post:
 
   ```
-  PAIRS=5025515480+572559211,6599040404+6108222286,1406051646+6572975237,1274840834+871410038
+  ✅ Pairs round created — 2 pairs, 7 days.
+  Counting workouts dated 2026-09-07 – 2026-09-13 (inclusive).
+  Final board posts 2026-09-14 at 09:00.
   ```
 
-  Unset → the coach's default pairs (the four above) apply. Set to an **empty**
-  value (`PAIRS=`) to **disable** the pairs board entirely (nothing is posted;
-  the job isn't even registered). A **malformed** entry — anything that isn't
-  exactly two `+`-separated integers — **fails fast** at startup with a clear
-  `ConfigError`, exactly like a bad `SEASON_START_DATE`.
-- **Scoring reuses the individual board's aggregation** — the same Mon–Sun window,
+Coach-only. Validation is strict and **nothing is saved** unless everything is
+valid: an unknown `@username`, a pair that isn't exactly two people, someone
+paired with themselves, or the same person in two pairs are all rejected with a
+clear explanation.
+
+#### While a round is running
+
+- **`/pairs`** — live standings for the round's own window, plus its dates and
+  whether it's still in progress. With no active round it says so and points you
+  at `/setpairs`.
+- **`/pairs stop`** — end the round immediately. No final board is posted and
+  nothing is tracked afterwards. (`cancel`/`end` also work.)
+
+#### When a round ends
+
+At **09:00 on the day after the end date** the bot posts the final board with
+the round's dates, then marks the round finished. A round ending Sunday is
+therefore reported **Monday 09:00**, exactly as before. The board is posted
+**once** — a restart or scheduler misfire can't duplicate or lose it, and if the
+send fails it retries the next morning.
+
+Running `/setpairs` again **replaces** any active round (the old one is
+cancelled), so only one competition ever runs at a time. Rounds are stored in a
+**`Pairs` tab** in your Google Sheet, so they survive restarts and redeploys; old
+rounds are kept for history, never deleted.
+
+> **The `PAIRS` environment variable is no longer used.** Pairs are created with
+> `/setpairs` instead. If it's still set, the bot logs a warning at startup and
+> ignores it — you can safely delete the variable.
+#### Scoring (unchanged)
+
+- **Scoring reuses the individual board's aggregation** — the same round window,
   the same `SEASON_START_DATE` cutoff, and the same **already-stored** point
   values. There are **no pair multipliers**: running still yields more than the
   flat 5 for walking/cycling/strength, and `streak_bonus` rows count as normal
   points. A pair's total is simply the **sum of both members'** points; a member
-  with no workouts that week contributes **0** (the pair is never skipped).
+  with no workouts in the round contributes **0** (the pair is never skipped).
 - **Members render in the configured order**, `Member A ; Member B`, using the
   same labels as the individual board (full name, else `@username`, else
   `user <id>`) — so a member without a Telegram username still shows by name.
@@ -475,9 +519,9 @@ streak, or overachievement (those stay running-only).
 
 | Activity | Minimum duration | Points | Success reply | Below-minimum reply |
 |----------|:----------------:|:------:|---------------|---------------------|
-| Walking | **40 min** | 5 | `✅ Nice walk, {name}! +5 points.` | `⚠️ Walk is {dur} min — minimum is 40 min to earn points.` |
-| Cycling | **60 min** | 5 | `✅ Nice ride, {name}! +5 points.` | `⚠️ Ride is {dur} min — minimum is 60 min to earn points.` |
-| Strength/stretch | **15 min** | 5 | `✅ Nice strength session, {name}! +5 points.` | `⚠️ Strength/stretch is {dur} min — minimum is 15 min to earn points.` |
+| Walking | **40 min** | 5 | `✅ Nice walk, {name}! +5 points. //total week = {total} points` | `⚠️ Walk is {dur} min — minimum is 40 min to earn points.` |
+| Cycling | **60 min** | 5 | `✅ Nice ride, {name}! +5 points. //total week = {total} points` | `⚠️ Ride is {dur} min — minimum is 60 min to earn points.` |
+| Strength/stretch | **15 min** | 5 | `✅ Nice strength session, {name}! +5 points. //total week = {total} points` | `⚠️ Strength/stretch is {dur} min — minimum is 15 min to earn points.` |
 
 - "Strength" covers **strength training and stretching/yoga/mobility**.
 - Below the minimum duration → **no points, not logged**; the bot just replies
@@ -599,19 +643,20 @@ for you.` and does nothing. Coaches can set or view **other** members' plans.
 - **`/whoami`** — replies with your (or, when used as a reply, the replied-to
   user's) Telegram id and name, so coaches can discover member IDs for
   `COACH_IDS` and for username resolution.
+- **`/setpairs <duration> <pair> …`** — **coach-only**: starts a time-boxed pairs
+  round, e.g. `/setpairs 1w @alice+@bob @carol+@dave`. See
+  [Pairs leaderboard](#pairs-leaderboard). Nothing is saved unless every pair is
+  valid; running it again replaces any active round.
 - **`/pairs`** — **coach-only** (same `COACH_IDS` check as `/setplan`): replies
-  with the **current** week's pairs leaderboard on demand, using the same
-  formatting as the scheduled Monday 09:00 board. Non-coaches get a short
-  "coach only" message. Like `/setplan`, it is intentionally **not** advertised
-  in the public command menu.
-- **`/pairs last`** — the same board for the **previous** full Mon–Sun week, i.e.
-  exactly the window the scheduled Monday 09:00 board reports. Use it to re-check
-  or re-post that board after a [late submission](#late-submission-grace-period)
-  was accepted (a late row keeps its real `workout_date`, so it belongs to that
-  week). The reported window is appended to the message (e.g.
-  `(2026-08-03 – 2026-08-09)`) so it can't be mistaken for the current week.
-  `prev` and `previous` work as aliases and the argument is case-insensitive; any
-  other argument falls back to the current week.
+  with the **live standings of the active round**, over the round's own window,
+  using the same formatting as the scheduled board, with the round's dates and
+  status appended (e.g. `(2026-09-07 – 2026-09-13, in progress)`). With no active
+  round it says so and points you at `/setpairs`. Non-coaches get a short "coach
+  only" message. Like `/setplan`, it is intentionally **not** advertised in the
+  public command menu.
+- **`/pairs stop`** — ends the active round immediately: no final board is posted
+  and pairs stop being tracked. `cancel` and `end` are aliases and the argument is
+  case-insensitive.
 
 ---
 ---
@@ -633,7 +678,7 @@ for you.` and does nothing. Coaches can set or view **other** members' plans.
 | `SEASON_START_DATE` | ❌ | `2026-07-12` | ISO date (`YYYY-MM-DD`). Points and the leaderboard count only submissions dated on or after this date; earlier submissions are ignored so the season restarts everyone at zero without deleting registrations or coach-assigned plans. |
 | `LATE_SUBMISSION_GRACE_UNTIL_HOUR` | ❌ | `9` | The Monday hour (0–23, local `TIMEZONE`) until which a workout dated in the **just-finished** Mon–Sun week is still accepted and scored — the default `9` matches the Mon 09:00/09:05 leaderboards. The row keeps its real `workout_date`, so it counts toward the week being reported. Set to `0` to disable (strict current-week-only). Malformed values (non-integer or outside 0–23) fail fast with a `ConfigError`. |
 | `COACH_IDS` | ❌ | *(empty)* | Comma-separated Telegram user IDs (e.g. `123,456`) allowed to set up workouts/plans. Only coaches can run `/setplan`; regular users cannot set up their own workouts. Blank/unset → no coaches (nobody can set plans). Non-integer entries are skipped with a warning. Use `/whoami` (reply to a member) to find IDs. |
-| `PAIRS` | ❌ | *(the coach's 4 default pairs)* | Competition pairs for the weekly **pairs** leaderboard. Pairs separated by `,`, the two Telegram user IDs within a pair joined by `+` — e.g. `123+456,789+1011`. Unset → the built-in default pairs. Set to an **empty** value (`PAIRS=`) to **disable** the pairs board (job not registered, nothing posted). A **malformed** entry (not exactly two `+`-separated integers) **fails fast** at startup with a `ConfigError`. See [Pairs leaderboard](#pairs-leaderboard). |
+| ~~`PAIRS`~~ | — | *(removed)* | **No longer used.** Pairs are now created by a coach with `/setpairs` and last only for the duration they specify — see [Pairs leaderboard](#pairs-leaderboard). If this variable is still set the bot logs a warning at startup and ignores it; you can safely delete it. |
 | `LOG_LEVEL` | ❌ | `INFO` | `DEBUG`/`INFO`/`WARNING`/`ERROR`. |
 
 See [`.env.example`](.env.example) for a copy-paste template.

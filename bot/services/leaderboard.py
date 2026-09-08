@@ -223,15 +223,24 @@ class LeaderboardService:
         start_date: date,
         end_date: date,
     ) -> str:
-        """Format the weekly pairs leaderboard message for a Mon–Sun range.
+        """Format the pairs leaderboard message for a round's date range.
 
         Uses the SAME renderer as the individual boards, so lines read
         ``{A} ; {B}  - {points} points`` (two spaces before the hyphen) with
         medals for ranks 1–3 and the "1224" standard competition ranking for
         ties.
+
+        The header says "Weekly" only when the range really is 7 days, since a
+        coach-created round can be any length (see
+        :func:`bot.handlers.commands.setpairs_command`).
         """
 
-        header = "Weekly pairs leaders board 🏆"
+        days = (end_date - start_date).days + 1
+        header = (
+            "Weekly pairs leaders board 🏆"
+            if days == 7
+            else "Pairs leaders board 🏆"
+        )
         if not entries:
             return f"{header}\n\nNo pairs configured."
         return f"{header}\n\n{self._format_ranking(entries)}"

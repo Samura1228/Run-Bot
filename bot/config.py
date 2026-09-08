@@ -18,15 +18,11 @@ from pydantic import BaseModel, Field, ValidationError, field_validator
 
 logger = logging.getLogger(__name__)
 
-# Coach-configured competition pairs (Telegram user IDs), used as the default
-# when the ``PAIRS`` env var is unset. Each tuple is ``(member_a, member_b)``
-# and the order is preserved in the rendered pairs leaderboard label.
-DEFAULT_PAIRS: tuple[tuple[int, int], ...] = (
-    (5025515480, 572559211),      # ArtLike_ (@artquite)  + MY (@MaksYezhovv)
-    (6599040404, 6108222286),     # AB (@Mak1225)         + Elena (no username)
-    (1406051646, 6572975237),     # . (@amgborz)          + Anastasia S (@asn_nova)
-    (1274840834, 871410038),      # Матвѣй (@shut_obychniy) + Marfa Sh (@FundersVC)
-)
+# NOTE: competition pairs are no longer configured here. They are created by a
+# coach with ``/setpairs <duration> <pair>…``, stored as a time-boxed ROUND in
+# the ``Pairs`` worksheet, and tracked ONLY while that round is active. The
+# former ``PAIRS`` env var and its ``DEFAULT_PAIRS`` fallback were removed so an
+# old deploy-time list can never quietly resume being scored.
 
 
 class Settings(BaseModel):
@@ -67,15 +63,6 @@ class Settings(BaseModel):
     # Sourced from the optional ``COACH_IDS`` env var (comma-separated). Empty
     # set means no coaches configured (self-service still works for everyone).
     coach_ids: set[int] = Field(default_factory=set)
-    # Competition pairs for the weekly PAIRS leaderboard: a list of
-    # ``(member_a_id, member_b_id)`` tuples in the coach's configured order.
-    # Sourced from the optional ``PAIRS`` env var (``id+id,id+id``); defaults to
-    # :data:`DEFAULT_PAIRS`. An EMPTY list disables the pairs board entirely
-    # (nothing is posted) — set ``PAIRS=`` (blank) to opt out.
-    pairs: list[tuple[int, int]] = Field(
-        default_factory=lambda: [tuple(pair) for pair in DEFAULT_PAIRS]
-    )
-
     def is_coach(self, user_id: int) -> bool:
         """Return True if the given Telegram user id is a configured coach."""
 
@@ -156,53 +143,6 @@ def _parse_late_submission_grace_until_hour(raw: Optional[str]) -> Optional[int]
             f"(0 disables the grace period), got: {hour}"
         )
     return hour
-
-
-def _parse_pairs(raw: Optional[str]) -> Optional[list[tuple[int, int]]]:
-    """Parse the ``PAIRS`` env var into a list of ``(member_a, member_b)`` ids.
-
-    Format: pairs separated by ``,``, the two Telegram user IDs within a pair
-    separated by ``+`` — e.g. ``123+456,789+1011``. Whitespace around any token
-    is ignored, as are blank entries.
-
-    Returns:
-        ``None`` when the variable is UNSET (so the :class:`Settings` default,
-        :data:`DEFAULT_PAIRS`, applies), an EMPTY list when it is explicitly set
-        to a blank string (pairs feature disabled — nothing is posted), or the
-        parsed list otherwise.
-
-    Raises:
-        ConfigError: If an entry is malformed (not exactly two ``+``-separated
-            tokens, or a token that is not an integer). Like
-            ``SEASON_START_DATE``, a typo fails fast at startup rather than
-            silently pairing the wrong people.
-    """
-
-    if raw is None:
-        return None
-    if raw.strip() == "":
-        return []
-
-    pairs: list[tuple[int, int]] = []
-    for token in raw.split(","):
-        entry = token.strip()
-        if entry == "":
-            continue
-        members = [member.strip() for member in entry.split("+")]
-        if len(members) != 2 or any(member == "" for member in members):
-            raise ConfigError(
-                "PAIRS entries must be exactly two Telegram user IDs joined by "
-                f"'+' (e.g. 123+456), got: {entry!r}"
-            )
-        try:
-            member_a, member_b = (int(member) for member in members)
-        except ValueError as exc:
-            raise ConfigError(
-                "PAIRS member IDs must be integers (e.g. 123+456), "
-                f"got: {entry!r}"
-            ) from exc
-        pairs.append((member_a, member_b))
-    return pairs
 
 
 def _parse_coach_ids(raw: Optional[str]) -> set[int]:
@@ -328,13 +268,15 @@ def load_settings() -> Settings:
                 "LATE_SUBMISSION_GRACE_UNTIL_HOUR is 0 — previous-week "
                 "submissions are rejected as soon as the week rolls over."
             )
-    # PAIRS is optional: unset → the DEFAULT_PAIRS default applies; explicitly
-    # blank → an empty list (pairs board disabled); malformed → ConfigError.
-    pairs = _parse_pairs(os.environ.get("PAIRS"))
-    if pairs is not None:
-        kwargs["pairs"] = pairs
-        if not pairs:
-            logger.info("PAIRS is empty — the weekly pairs leaderboard is disabled.")
+    # The legacy PAIRS env var is no longer used: pairs are created per ROUND by
+    # a coach via /setpairs and stored in the Pairs worksheet. Warn once if it is
+    # still set on the deployment so the operator knows it now does nothing.
+    if os.environ.get("PAIRS"):
+        logger.warning(
+            "PAIRS is set but no longer used — pairs are now created with "
+            "/setpairs and last only for the duration the coach specifies. "
+            "You can safely delete the PAIRS variable."
+        )
 
     try:
         return Settings(**kwargs)

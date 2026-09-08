@@ -18,8 +18,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import timedelta
 from html import escape
 from typing import Optional
+from uuid import uuid4
 
 import anthropic
 from telegram import Update, User
@@ -29,8 +31,17 @@ from telegram.ext import ContextTypes
 
 from bot.config import Settings
 from bot.services.leaderboard import LeaderboardService
-from bot.services.sheets import SheetsService, check_sheets
-from bot.utils.dates import current_week_bounds, previous_week_bounds
+from bot.services.sheets import (
+    PAIRS_STATUS_CANCELLED,
+    SheetsService,
+    check_sheets,
+)
+from bot.utils.dates import (
+    MAX_ROUND_DAYS,
+    MIN_ROUND_DAYS,
+    parse_duration_days,
+    today_in,
+)
 from bot.utils.points import (
     DEFAULT_PLAN,
     MAX_PLAN,
@@ -48,9 +59,19 @@ _SETPLAN_USAGE = (
 )
 _COACH_ONLY_MSG = "Only a coach can set or view another member's plan."
 _SETPLAN_COACH_ONLY_MSG = "Only your coach can set up workouts for you."
-_PAIRS_COACH_ONLY_MSG = "Only a coach can view the pairs leaderboard."
-# Accepted spellings of the /pairs argument selecting the PREVIOUS full week.
-_PAIRS_LAST_ARGS = frozenset({"last", "prev", "previous"})
+_PAIRS_COACH_ONLY_MSG = "Only a coach can manage the pairs leaderboard."
+# Accepted spellings of the /pairs argument that cancels the active round.
+_PAIRS_STOP_ARGS = frozenset({"stop", "cancel", "end"})
+_SETPAIRS_USAGE = (
+    "Usage (coach only): /setpairs <duration> <pair> [pair ...]\n"
+    "Example: /setpairs 1w @alice+@bob @carol+@dave\n"
+    "Duration: 1w, 2w, 10d… Each pair is two people joined by '+' "
+    "(@username or numeric ID)."
+)
+_NO_ACTIVE_ROUND_MSG = (
+    "No pairs competition is running right now, so no pairs are being tracked.\n"
+    "Start one with /setpairs — e.g. /setpairs 1w @alice+@bob @carol+@dave"
+)
 
 
 async def chatid_command(
@@ -482,20 +503,200 @@ async def myplan_command(
             f"{who} — plan: {plan} workouts/week · streak: {streak} weeks.{note}",
         )
 
+async def _resolve_pair_member(
+    token: str, sheets: SheetsService
+) -> tuple[Optional[int], Optional[str]]:
+    """Resolve one ``/setpairs`` member token to a Telegram user id.
+
+    Accepts a raw numeric id or an ``@username`` (resolved through the ``Plans``
+    directory, which every poster refreshes automatically). Returns
+    ``(user_id, None)`` on success or ``(None, error_text)`` describing what to
+    fix — never raises.
+    """
+
+    entry = (token or "").strip()
+    if not entry:
+        return None, "an empty member name"
+
+    if entry.lstrip("-").isdigit():
+        return int(entry), None
+
+    username = entry.lstrip("@")
+    if not username:
+        return None, "an empty @username"
+    user_id = await sheets.find_user_id_by_username(username)
+    if user_id is None:
+        return None, (
+            f"@{username} — I don't know their ID yet. Ask them to post a "
+            "workout once, or reply to their message with /whoami."
+        )
+    return user_id, None
+
+
+async def setpairs_command(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Create a time-boxed pairs competition round — COACHES ONLY.
+
+    Usage::
+
+        /setpairs 1w @alice+@bob @carol+@dave
+        /setpairs 10d 123456+789012
+
+    The first argument is how long the round lasts (``1w``/``2weeks``/``10d``);
+    each remaining argument is one pair joined by ``+``. The round starts TODAY
+    and covers whole calendar days (workouts carry a date, not a time), so
+    ``1w`` means today plus the next six days, inclusive.
+
+    While the round is active the bot counts those pairs' combined points; at
+    09:00 on the day AFTER it ends the final board is posted and the round is
+    closed. After that NOTHING is tracked or posted until a coach creates a new
+    round — the pairs feature is entirely opt-in per round.
+
+    Creating a round automatically supersedes (cancels) any still-active one, so
+    there is never more than one competition running.
+    """
+
+    message = update.effective_message
+    if message is None:
+        return
+
+    try:
+        caller = message.from_user
+        if caller is None:
+            return
+
+        settings = _get_settings(context)
+        sheets = _get_sheets(context)
+        if settings is None or sheets is None:
+            await _safe_reply(
+                message, "❌ Could not create the pairs round — internal error."
+            )
+            return
+
+        if not settings.is_coach(caller.id):
+            await _safe_reply(message, _PAIRS_COACH_ONLY_MSG)
+            return
+
+        args = getattr(context, "args", None) or []
+        if len(args) < 2:
+            await _safe_reply(message, _SETPAIRS_USAGE)
+            return
+
+        days = parse_duration_days(args[0])
+        if days is None:
+            await _safe_reply(
+                message,
+                f"⚠️ '{args[0]}' isn't a valid duration. Use e.g. 1w, 2w or 10d "
+                f"({MIN_ROUND_DAYS}–{MAX_ROUND_DAYS} days).\n\n{_SETPAIRS_USAGE}",
+            )
+            return
+
+        # Resolve every pair before writing anything, so a single bad name never
+        # creates a half-configured round.
+        pairs: list[tuple[int, int]] = []
+        problems: list[str] = []
+        for token in args[1:]:
+            members = token.split("+")
+            if len(members) != 2:
+                problems.append(
+                    f"'{token}' — a pair must be exactly two members joined by "
+                    "'+' (e.g. @alice+@bob)"
+                )
+                continue
+            member_a, error_a = await _resolve_pair_member(members[0], sheets)
+            member_b, error_b = await _resolve_pair_member(members[1], sheets)
+            for error in (error_a, error_b):
+                if error is not None:
+                    problems.append(error)
+            if member_a is None or member_b is None:
+                continue
+            if member_a == member_b:
+                problems.append(f"'{token}' — a pair needs two DIFFERENT people")
+                continue
+            pairs.append((member_a, member_b))
+
+        if problems:
+            await _safe_reply(
+                message,
+                "⚠️ Couldn't create the pairs round:\n"
+                + "\n".join(f"• {problem}" for problem in problems),
+            )
+            return
+        if not pairs:
+            await _safe_reply(message, _SETPAIRS_USAGE)
+            return
+
+        duplicates = [
+            member for member in
+            [m for pair in pairs for m in pair]
+            if [m for pair in pairs for m in pair].count(member) > 1
+        ]
+        if duplicates:
+            await _safe_reply(
+                message,
+                "⚠️ Someone appears in more than one pair. Each person can only "
+                "be in a single pair.",
+            )
+            return
+
+        start_date = today_in(settings.timezone)
+        end_date = start_date + timedelta(days=days - 1)
+
+        # Supersede any still-running round so only one is ever active.
+        previous = await sheets.get_current_pairs_round()
+        if previous is not None:
+            await sheets.set_pairs_round_status(
+                previous["round_id"], PAIRS_STATUS_CANCELLED
+            )
+
+        round_id = f"{start_date.isoformat()}-{uuid4().hex[:6]}"
+        await sheets.create_pairs_round(
+            round_id=round_id,
+            start_date=start_date,
+            end_date=end_date,
+            pairs=pairs,
+            created_by=caller.id,
+        )
+
+        lines = [
+            f"✅ Pairs round created — {len(pairs)} "
+            f"pair{'s' if len(pairs) != 1 else ''}, {days} day"
+            f"{'s' if days != 1 else ''}.",
+            f"Counting workouts dated {start_date} – {end_date} (inclusive).",
+            f"Final board posts {end_date + timedelta(days=1)} at 09:00.",
+        ]
+        if previous is not None:
+            lines.append("The previous round was cancelled and replaced.")
+        await _safe_reply(message, "\n".join(lines))
+        logger.info(
+            "Pairs round %s created by %s: %d pairs, %s–%s.",
+            round_id,
+            caller.id,
+            len(pairs),
+            start_date,
+            end_date,
+        )
+    except Exception as exc:  # noqa: BLE001 - defensive: never fail silently
+        logger.error("Unexpected error handling /setpairs: %s", exc, exc_info=exc)
+        await _safe_reply(
+            message, "⚠️ Something went wrong creating the pairs round. Try again."
+        )
+
+
 async def pairs_command(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    """Reply with the pairs leaderboard — COACHES ONLY.
+    """Show (or stop) the CURRENT pairs round — COACHES ONLY.
 
-    Uses the same coach guard as ``/setplan`` (:meth:`Settings.is_coach`) and
-    the same aggregation/formatting as the scheduled Monday 09:00 pairs board.
+    Uses the same coach guard as ``/setplan`` (:meth:`Settings.is_coach`) and the
+    same aggregation/formatting as the scheduled final board.
 
-    - ``/pairs`` → the CURRENT (in-progress) Mon–Sun week, so a coach can check
-      standings on demand.
-    - ``/pairs last`` → the PREVIOUS full Mon–Sun week, i.e. the exact window the
-      scheduled Monday 09:00 board reports. Useful for re-checking or re-posting
-      that board after a late submission was accepted under the grace period (a
-      late row keeps its real ``workout_date``, so it belongs to this window).
+    - ``/pairs`` → live standings of the active round, over the round's OWN
+      window (see :func:`setpairs_command`). When no round is active it says so
+      and points at ``/setpairs`` — the bot tracks nothing until one exists.
+    - ``/pairs stop`` → cancel the active round immediately. No final board is
+      posted and nothing is tracked afterwards.
 
     Intentionally NOT advertised in the public command menu (like ``/setplan``).
     """
@@ -510,7 +711,8 @@ async def pairs_command(
             return
 
         settings = _get_settings(context)
-        if settings is None:
+        sheets = _get_sheets(context)
+        if settings is None or sheets is None:
             await _safe_reply(
                 message, "❌ Could not build the pairs board — internal error."
             )
@@ -520,9 +722,23 @@ async def pairs_command(
             await _safe_reply(message, _PAIRS_COACH_ONLY_MSG)
             return
 
-        if not settings.pairs:
+        current = await sheets.get_current_pairs_round()
+        if current is None:
+            await _safe_reply(message, _NO_ACTIVE_ROUND_MSG)
+            return
+
+        args = getattr(context, "args", None) or []
+        if args and args[0].strip().lower() in _PAIRS_STOP_ARGS:
+            await sheets.set_pairs_round_status(
+                current["round_id"], PAIRS_STATUS_CANCELLED
+            )
+            logger.info(
+                "Pairs round %s cancelled by %s.", current["round_id"], caller.id
+            )
             await _safe_reply(
-                message, "No pairs configured (the PAIRS setting is empty)."
+                message,
+                "🛑 Pairs round stopped. No final board will be posted and no "
+                "pairs are being tracked. Use /setpairs to start a new one.",
             )
             return
 
@@ -533,26 +749,20 @@ async def pairs_command(
             )
             return
 
-        # Optional "last" argument selects the previous full Mon–Sun week (the
-        # window the scheduled Monday 09:00 board reports); anything else — and
-        # no argument — keeps the default current-week behaviour.
-        args = getattr(context, "args", None) or []
-        want_previous = bool(args) and args[0].strip().lower() in _PAIRS_LAST_ARGS
-
-        if want_previous:
-            start_date, end_date = previous_week_bounds(settings.timezone)
-        else:
-            start_date, end_date = current_week_bounds(settings.timezone)
+        start_date = current["start_date"]
+        end_date = current["end_date"]
         entries = await leaderboard.aggregate_pairs(
-            settings.pairs, start_date, end_date
+            current["members"], start_date, end_date
         )
-        text = leaderboard.format_pairs(entries, start_date, end_date)
-        if want_previous:
-            # Make the reported window explicit so a re-posted previous-week
-            # board can't be mistaken for the current one. The scheduled board's
-            # own text is untouched.
-            text = f"{text}\n\n({start_date} – {end_date})"
-        await _safe_reply(message, text)
+        today = today_in(settings.timezone)
+        state = (
+            "in progress" if today <= end_date else "finished, awaiting the board"
+        )
+        await _safe_reply(
+            message,
+            f"{leaderboard.format_pairs(entries, start_date, end_date)}\n\n"
+            f"({start_date} – {end_date}, {state})",
+        )
     except Exception as exc:  # noqa: BLE001 - defensive: never fail silently
         logger.error("Unexpected error handling /pairs: %s", exc, exc_info=exc)
         await _safe_reply(

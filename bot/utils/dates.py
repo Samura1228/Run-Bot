@@ -8,9 +8,38 @@ DST — the timezone is only used to determine what "today" is.
 
 from __future__ import annotations
 
+import re
 from datetime import date, datetime, timedelta
 from typing import Optional
 from zoneinfo import ZoneInfo
+
+# Accepted duration spellings for a pairs round: "1w"/"2weeks"/"10d"/"3days".
+_DURATION_RE = re.compile(r"^(\d+)\s*(d|day|days|w|week|weeks)$", re.IGNORECASE)
+
+# Guard rails for a pairs round length (in days), so a typo like "500w" can't
+# create a round that never ends.
+MIN_ROUND_DAYS = 1
+MAX_ROUND_DAYS = 365
+
+
+def parse_duration_days(raw: str) -> Optional[int]:
+    """Parse a human duration like ``1w`` / ``2 weeks`` / ``10d`` into DAYS.
+
+    Returns the number of whole days, or ``None`` when the value is malformed or
+    outside :data:`MIN_ROUND_DAYS`–:data:`MAX_ROUND_DAYS`. Whole days are the
+    only meaningful unit here because workouts are stored with a calendar
+    ``workout_date`` and no time component.
+    """
+
+    match = _DURATION_RE.match((raw or "").strip())
+    if match is None:
+        return None
+    amount = int(match.group(1))
+    unit = match.group(2).lower()
+    days = amount * 7 if unit.startswith("w") else amount
+    if not MIN_ROUND_DAYS <= days <= MAX_ROUND_DAYS:
+        return None
+    return days
 
 
 def now_in(tz: str) -> datetime:

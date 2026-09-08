@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import date, datetime, timezone
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Optional, Sequence
 
 import gspread
 from google.oauth2.service_account import Credentials
@@ -29,6 +29,7 @@ _SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 WORKSHEET_NAME = "Log"
 PLANS_WORKSHEET_NAME = "Plans"
+PAIRS_WORKSHEET_NAME = "Pairs"
 
 # Append retry policy: up to 3 attempts with exponential backoff (1s, 2s, 4s).
 _APPEND_MAX_ATTEMPTS = 3
@@ -98,6 +99,35 @@ _PLAN_COL_PLAN = 2
 _PLAN_COL_STREAK = 3
 _PLAN_COL_UPDATED_AT = 4
 
+# --- Pairs worksheet ------------------------------------------------------ #
+# One row per coach-created pairs ROUND. A round has an explicit start/end date
+# (inclusive) and is only counted while it is active; when it ends the final
+# board is posted and the round is marked ``posted`` so nothing is posted again.
+# Rounds are never deleted, so the history stays auditable.
+PAIRS_HEADER_ROW = [
+    "round_id",
+    "start_date",
+    "end_date",
+    "members",
+    "status",
+    "created_by",
+    "created_at",
+]
+
+# Column indices (0-based) for the Pairs worksheet.
+_PAIRS_COL_ROUND_ID = 0
+_PAIRS_COL_START_DATE = 1
+_PAIRS_COL_END_DATE = 2
+_PAIRS_COL_MEMBERS = 3
+_PAIRS_COL_STATUS = 4
+_PAIRS_COL_CREATED_BY = 5
+_PAIRS_COL_CREATED_AT = 6
+
+# Pairs round lifecycle.
+PAIRS_STATUS_ACTIVE = "active"      # counting; the board has not been posted yet
+PAIRS_STATUS_POSTED = "posted"      # finished and the final board was posted
+PAIRS_STATUS_CANCELLED = "cancelled"  # stopped early by a coach
+
 
 class SheetsService:
     """Encapsulates all Google Sheets access for the bot."""
@@ -119,6 +149,7 @@ class SheetsService:
         self._client: Optional[gspread.Client] = None
         self._worksheet: Optional[gspread.Worksheet] = None
         self._plans_worksheet: Optional[gspread.Worksheet] = None
+        self._pairs_worksheet: Optional[gspread.Worksheet] = None
 
     # ------------------------------------------------------------------ #
     # Initialization
@@ -171,6 +202,28 @@ class SheetsService:
 
         self._plans_worksheet = plans_ws
 
+        # Ensure the Pairs worksheet exists / has the correct header row, using
+        # the same auto-create/repair behaviour as the Log and Plans tabs.
+        try:
+            pairs_ws = spreadsheet.worksheet(PAIRS_WORKSHEET_NAME)
+        except gspread.WorksheetNotFound:
+            pairs_ws = spreadsheet.add_worksheet(
+                title=PAIRS_WORKSHEET_NAME, rows=1000, cols=len(PAIRS_HEADER_ROW)
+            )
+            pairs_ws.update(values=[PAIRS_HEADER_ROW], range_name="A1")
+            logger.info(
+                "Created worksheet %r with header row.", PAIRS_WORKSHEET_NAME
+            )
+        else:
+            existing_pairs = pairs_ws.row_values(1)
+            if existing_pairs != PAIRS_HEADER_ROW:
+                pairs_ws.update(values=[PAIRS_HEADER_ROW], range_name="A1")
+                logger.info(
+                    "Reset header row on worksheet %r.", PAIRS_WORKSHEET_NAME
+                )
+
+        self._pairs_worksheet = pairs_ws
+
     async def initialize(self) -> None:
         """Authorize and prepare the worksheet (creating it if missing)."""
 
@@ -181,6 +234,11 @@ class SheetsService:
         if self._worksheet is None:
             raise RuntimeError("SheetsService not initialized; call initialize().")
         return self._worksheet
+
+    def _require_pairs_worksheet(self) -> gspread.Worksheet:
+        if self._pairs_worksheet is None:
+            raise RuntimeError("SheetsService not initialized; call initialize().")
+        return self._pairs_worksheet
 
     def _require_plans_worksheet(self) -> gspread.Worksheet:
         if self._plans_worksheet is None:
@@ -306,6 +364,45 @@ class SheetsService:
             if in_range(wdate, week_start, week_end):
                 count += 1
         return count
+
+    async def sum_user_points_in_range(
+        self, user_id: int, start_date: date, end_date: date
+    ) -> float:
+        """Return the SUM of one user's points over an inclusive date range.
+
+        Unlike :meth:`count_user_workouts_in_week` (running rows only, used for
+        the plan-based per-workout rate) this sums EVERY row the user has in the
+        range — running, the flat bonus activities and ``streak_bonus`` — so the
+        value matches what the weekly leaderboard shows for that user. Used for
+        the "total week" figure appended to the success reply after a submission
+        has been written.
+
+        Rows that fail to parse are skipped, and pre-season rows are excluded by
+        the same season cutoff the leaderboard uses.
+        """
+
+        rows = await asyncio.to_thread(self._read_all_records_sync)
+        user_id_str = str(user_id)
+        total = 0.0
+
+        for row in rows[1:]:  # skip header
+            if len(row) <= _COL_POINTS:
+                continue
+            if row[_COL_USER_ID] != user_id_str:
+                continue
+            try:
+                wdate = date.fromisoformat(row[_COL_WORKOUT_DATE])
+            except (ValueError, IndexError):
+                continue
+            if self._before_season(wdate):
+                continue
+            if not in_range(wdate, start_date, end_date):
+                continue
+            try:
+                total += float(row[_COL_POINTS])
+            except (ValueError, IndexError):
+                continue
+        return round(total, 2)
 
     async def has_streak_bonus_for_date(
         self, user_id: int, bonus_date: date
@@ -657,6 +754,174 @@ class SheetsService:
             resolved_plan,
             streak,
             label=f"set_streak user={user_id}",
+        )
+# ------------------------------------------------------------------ #
+    # Pairs worksheet reads/writes (coach-created rounds)
+    # ------------------------------------------------------------------ #
+    def _read_all_pairs_sync(self) -> list[list[str]]:
+        """Return all Pairs rows (including header) as lists of strings."""
+
+        worksheet = self._require_pairs_worksheet()
+        return worksheet.get_all_values()
+
+    @staticmethod
+    def _serialize_members(pairs: Sequence[tuple[int, int]]) -> str:
+        """Serialize pairs to the ``id+id,id+id`` cell format.
+
+        Deliberately the SAME syntax the legacy ``PAIRS`` env var used, so the
+        stored value stays readable and hand-editable in the sheet.
+        """
+
+        return ",".join(f"{a}+{b}" for a, b in pairs)
+
+    @staticmethod
+    def _parse_members(raw: str) -> list[tuple[int, int]]:
+        """Parse an ``id+id,id+id`` members cell, skipping malformed entries.
+
+        Never raises: a hand-edited/corrupt cell degrades to the entries that
+        do parse rather than breaking the scheduled board.
+        """
+
+        pairs: list[tuple[int, int]] = []
+        for token in (raw or "").split(","):
+            entry = token.strip()
+            if not entry:
+                continue
+            members = entry.split("+")
+            if len(members) != 2:
+                logger.warning("Pairs: skipping malformed members entry %r.", entry)
+                continue
+            try:
+                pairs.append((int(members[0].strip()), int(members[1].strip())))
+            except ValueError:
+                logger.warning("Pairs: skipping non-integer members entry %r.", entry)
+        return pairs
+
+    def _parse_pairs_row(self, row: list[str]) -> Optional[dict[str, Any]]:
+        """Parse one Pairs row into a dict, or ``None`` if unusable."""
+
+        if len(row) <= _PAIRS_COL_STATUS:
+            return None
+        try:
+            start_date = date.fromisoformat(row[_PAIRS_COL_START_DATE].strip())
+            end_date = date.fromisoformat(row[_PAIRS_COL_END_DATE].strip())
+        except (ValueError, IndexError):
+            return None
+        members = self._parse_members(row[_PAIRS_COL_MEMBERS])
+        if not members:
+            return None
+        return {
+            "round_id": row[_PAIRS_COL_ROUND_ID].strip(),
+            "start_date": start_date,
+            "end_date": end_date,
+            "members": members,
+            "status": row[_PAIRS_COL_STATUS].strip().lower(),
+            "created_by": (
+                row[_PAIRS_COL_CREATED_BY]
+                if len(row) > _PAIRS_COL_CREATED_BY
+                else ""
+            ),
+        }
+
+    async def list_pairs_rounds(self) -> list[dict[str, Any]]:
+        """Return every parsable pairs round, oldest first.
+
+        Each dict has ``round_id`` (str), ``start_date``/``end_date``
+        (:class:`datetime.date`), ``members`` (list of ``(a, b)`` id tuples),
+        ``status`` (str) and ``created_by`` (str). Unparseable rows are skipped.
+        """
+
+        rows = await asyncio.to_thread(self._read_all_pairs_sync)
+        parsed: list[dict[str, Any]] = []
+        for row in rows[1:]:  # skip header
+            record = self._parse_pairs_row(row)
+            if record is not None:
+                parsed.append(record)
+        return parsed
+
+    async def get_current_pairs_round(self) -> Optional[dict[str, Any]]:
+        """Return the newest round still awaiting its final board, else ``None``.
+
+        A round qualifies while its status is ``active`` — whether or not its
+        end date has passed. A round whose window has closed but has not yet
+        been posted is therefore still returned, so the scheduler can pick it up
+        (and so a misfire/restart can't lose the final board). ``None`` means no
+        pairs competition is configured: NOTHING is tracked or posted.
+
+        The LAST matching row wins, so re-running ``/setpairs`` supersedes an
+        earlier round.
+        """
+
+        rounds = await self.list_pairs_rounds()
+        current: Optional[dict[str, Any]] = None
+        for record in rounds:
+            if record["status"] == PAIRS_STATUS_ACTIVE:
+                current = record  # keep scanning; the newest row wins
+        return current
+
+    def _append_pairs_round_sync(self, values: list[str]) -> None:
+        worksheet = self._require_pairs_worksheet()
+        worksheet.append_row(values, value_input_option="RAW")
+
+    async def create_pairs_round(
+        self,
+        round_id: str,
+        start_date: date,
+        end_date: date,
+        pairs: Sequence[tuple[int, int]],
+        created_by: int,
+    ) -> None:
+        """Append a new ``active`` pairs round.
+
+        The caller is responsible for closing any previous round first (see
+        :meth:`set_pairs_round_status`), so at most one round is ever active.
+        Retries transient failures with the shared backoff policy.
+        """
+
+        values = [
+            round_id,
+            start_date.isoformat(),
+            end_date.isoformat(),
+            self._serialize_members(pairs),
+            PAIRS_STATUS_ACTIVE,
+            str(created_by),
+            self._now_iso(),
+        ]
+        await self._retry_blocking(
+            self._append_pairs_round_sync,
+            values,
+            label=f"create_pairs_round {round_id}",
+        )
+
+    def _set_pairs_status_sync(self, round_id: str, status: str) -> None:
+        """Blocking status update for a single round row (by ``round_id``)."""
+
+        worksheet = self._require_pairs_worksheet()
+        rows = worksheet.get_all_values()
+        for offset, row in enumerate(rows[1:], start=2):  # header is row 1
+            if len(row) <= _PAIRS_COL_ROUND_ID:
+                continue
+            if row[_PAIRS_COL_ROUND_ID].strip() != round_id:
+                continue
+            column = chr(ord("A") + _PAIRS_COL_STATUS)
+            worksheet.update(
+                values=[[status]],
+                range_name=f"{column}{offset}",
+                value_input_option="RAW",
+            )
+            return
+        logger.warning(
+            "Pairs: round %r not found while setting status %r.", round_id, status
+        )
+
+    async def set_pairs_round_status(self, round_id: str, status: str) -> None:
+        """Mark a round ``posted`` or ``cancelled`` so it stops being tracked."""
+
+        await self._retry_blocking(
+            self._set_pairs_status_sync,
+            round_id,
+            status,
+            label=f"set_pairs_round_status {round_id}={status}",
         )
 
     async def _retry_blocking(
