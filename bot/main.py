@@ -85,10 +85,25 @@ def build_application(settings: Settings) -> Application:
     application.add_handler(CommandHandler("testsheet", testsheet_command))
     application.add_handler(CommandHandler("status", status_command))
     application.add_handler(CommandHandler("whoami", whoami_command))
-    application.add_handler(CommandHandler("setplan", setplan_command))
-    application.add_handler(CommandHandler("myplan", myplan_command))
-    application.add_handler(CommandHandler("pairs", pairs_command))
-    application.add_handler(CommandHandler("setpairs", setpairs_command))
+    # Each command is registered under its canonical name PLUS the natural
+    # spellings people actually type. PTB silently ignores any command it has
+    # no handler for, so an unregistered spelling makes the bot look broken:
+    # a coach typing "/setmyplan @user 4" got NO reply at all and no sheet
+    # write. Listing the aliases here is the cheapest way to make the command
+    # work however it is reasonably spelled. Aliases are deliberately close
+    # variants of our own names only — never generic words like "plan" — so
+    # the bot can't answer commands aimed at another bot in the group.
+    application.add_handler(
+        CommandHandler(["setplan", "setmyplan", "setuserplan", "setplans"],
+                       setplan_command)
+    )
+    application.add_handler(
+        CommandHandler(["myplan", "myplans"], myplan_command)
+    )
+    application.add_handler(CommandHandler(["pairs", "pair"], pairs_command))
+    application.add_handler(
+        CommandHandler(["setpairs", "setpair"], setpairs_command)
+    )
 
     # Register a global error handler so exceptions in the update loop are
     # logged cleanly (and Conflict is special-cased) instead of bubbling up.

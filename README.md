@@ -640,6 +640,12 @@ for you.` and does nothing. Coaches can set or view **other** members' plans.
   → check `GOOGLE_SERVICE_ACCOUNT_JSON`; missing/incorrect `GOOGLE_SHEET_ID`).
 - **`/chatid`** — replies with the current chat's ID, type, and title so you can
   discover the value for `TARGET_CHAT_ID`.
+- **Command aliases:** `/setplan` also answers to **`/setmyplan`**,
+  `/setuserplan` and `/setplans`; `/myplan` to `/myplans`; `/pairs` to `/pair`;
+  `/setpairs` to `/setpair`. Telegram bots silently ignore commands they have no
+  handler for, so a mistyped name previously produced **no reply at all** and no
+  sheet write — these aliases make the command work however it is reasonably
+  spelled.
 - **`/whoami`** — replies with your (or, when used as a reply, the replied-to
   user's) Telegram id and name, so coaches can discover member IDs for
   `COACH_IDS` and for username resolution.

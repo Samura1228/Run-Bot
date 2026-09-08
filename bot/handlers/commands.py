@@ -351,6 +351,11 @@ async def setplan_command(
 ) -> None:
     """Set a weekly plan (workouts/week) via ``/setplan`` — COACHES ONLY.
 
+    Also registered under the aliases ``/setmyplan``, ``/setuserplan`` and
+    ``/setplans`` (see :func:`bot.main.build_application`), since PTB ignores
+    any command it has no handler for — an unregistered spelling makes the bot
+    look dead: no reply AND no sheet write.
+
     Forms (coach only):
       - ``/setplan @username N`` → set that user's plan.
       - reply to a user's message + ``/setplan N`` → set their plan.
