@@ -63,10 +63,29 @@ class Settings(BaseModel):
     # Sourced from the optional ``COACH_IDS`` env var (comma-separated). Empty
     # set means no coaches configured (self-service still works for everyone).
     coach_ids: set[int] = Field(default_factory=set)
+    # Telegram user IDs allowed to manage the PAIRS competition (/setpairs,
+    # /pairs, /pairs stop) WITHOUT being a coach. Sourced from the optional
+    # ``PAIRS_ADMIN_IDS`` env var (comma-separated, same format as
+    # ``COACH_IDS``). This is deliberately a separate list from ``coach_ids``:
+    # it grants pairs management only and does NOT allow setting or viewing
+    # other members' plans via /setplan. Coaches always keep pairs access too.
+    pairs_admin_ids: set[int] = Field(default_factory=set)
+
     def is_coach(self, user_id: int) -> bool:
         """Return True if the given Telegram user id is a configured coach."""
 
         return user_id in self.coach_ids
+
+    def can_manage_pairs(self, user_id: int) -> bool:
+        """Return True if the user may run /setpairs and /pairs.
+
+        True for any configured coach OR anyone listed in ``PAIRS_ADMIN_IDS``.
+        Pairs admins are a strictly narrower role than coaches: they can start,
+        view and stop pairs rounds, but :meth:`is_coach` still gates /setplan,
+        so they cannot change anyone's training plan.
+        """
+
+        return self.is_coach(user_id) or user_id in self.pairs_admin_ids
 
     @field_validator("log_level")
     @classmethod
@@ -145,30 +164,37 @@ def _parse_late_submission_grace_until_hour(raw: Optional[str]) -> Optional[int]
     return hour
 
 
-def _parse_coach_ids(raw: Optional[str]) -> set[int]:
-    """Parse the ``COACH_IDS`` env var into a set of integer user IDs.
+def _parse_user_ids(raw: Optional[str], var_name: str) -> set[int]:
+    """Parse a comma-separated Telegram-user-ID env var into a set of ints.
 
-    The value is a comma-separated list of Telegram user IDs (e.g. ``123,456``).
-    Whitespace and blank entries are ignored. Non-integer entries are skipped
-    with a logged warning (rather than raising) so a typo never blocks boot.
-    A blank/unset value yields an empty set.
+    Shared by ``COACH_IDS`` and ``PAIRS_ADMIN_IDS``, which use the same format
+    (e.g. ``123,456``). Whitespace and blank entries are ignored. Non-integer
+    entries are skipped with a logged warning (rather than raising) so a typo
+    never blocks boot. A blank/unset value yields an empty set.
+
+    Args:
+        raw: The raw env var value, or ``None`` when unset.
+        var_name: The variable's name, used only in the warning message so a
+            bad entry is traceable to the right setting.
     """
 
     if raw is None or raw.strip() == "":
         return set()
 
-    coach_ids: set[int] = set()
+    user_ids: set[int] = set()
     for token in raw.split(","):
         entry = token.strip()
         if entry == "":
             continue
         try:
-            coach_ids.add(int(entry))
+            user_ids.add(int(entry))
         except ValueError:
             logger.warning(
-                "Ignoring invalid COACH_IDS entry %r (not an integer).", entry
+                "Ignoring invalid %s entry %r (not an integer).",
+                var_name,
+                entry,
             )
-    return coach_ids
+    return user_ids
 
 
 def _parse_service_account_json(raw: str) -> dict[str, Any]:
@@ -211,7 +237,12 @@ def load_settings() -> Settings:
 
     # COACH_IDS is optional: blank/unset → no coaches. Non-integer entries are
     # skipped with a warning (never a boot failure).
-    coach_ids = _parse_coach_ids(os.environ.get("COACH_IDS"))
+    coach_ids = _parse_user_ids(os.environ.get("COACH_IDS"), "COACH_IDS")
+    # PAIRS_ADMIN_IDS is optional and independent of COACH_IDS: it grants the
+    # pairs commands to people who are NOT coaches. Blank/unset → coaches only.
+    pairs_admin_ids = _parse_user_ids(
+        os.environ.get("PAIRS_ADMIN_IDS"), "PAIRS_ADMIN_IDS"
+    )
 
     kwargs: dict[str, Any] = {
         "telegram_bot_token": telegram_bot_token,
@@ -220,6 +251,7 @@ def load_settings() -> Settings:
         "google_sheet_id": google_sheet_id,
         "target_chat_id": target_chat_id,
         "coach_ids": coach_ids,
+        "pairs_admin_ids": pairs_admin_ids,
     }
 
     # Optional overrides.

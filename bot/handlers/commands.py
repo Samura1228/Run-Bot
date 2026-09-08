@@ -7,7 +7,9 @@ Contains simple slash-command handlers:
 - ``/testsheet`` — verifies Google Sheets connectivity and Editor access.
 - ``/status`` — a consolidated health report across Telegram, Anthropic, and
   Google Sheets, plus the configured target chat and timezone.
-- ``/pairs`` — coach-only, posts the current week's pairs leaderboard on demand.
+- ``/pairs`` — coaches & PAIRS_ADMIN_IDS, posts the current pairs board on
+  demand; ``/pairs stop`` ends the active round early.
+- ``/setpairs`` — coaches & PAIRS_ADMIN_IDS, starts a time-boxed pairs round.
 
 The commands work in any chat type (private, group, supergroup, channel) and,
 like the rest of the codebase, never crash on failure — errors are logged and
@@ -59,7 +61,11 @@ _SETPLAN_USAGE = (
 )
 _COACH_ONLY_MSG = "Only a coach can set or view another member's plan."
 _SETPLAN_COACH_ONLY_MSG = "Only your coach can set up workouts for you."
-_PAIRS_COACH_ONLY_MSG = "Only a coach can manage the pairs leaderboard."
+# Shown when someone who is neither a coach nor a PAIRS_ADMIN_IDS member tries
+# to run /setpairs or /pairs. Deliberately does not name who is allowed.
+_PAIRS_COACH_ONLY_MSG = (
+    "Only a coach or the pairs organiser can manage the pairs leaderboard."
+)
 # Accepted spellings of the /pairs argument that cancels the active round.
 _PAIRS_STOP_ARGS = frozenset({"stop", "cancel", "end"})
 _SETPAIRS_USAGE = (
@@ -536,7 +542,10 @@ async def _resolve_pair_member(
 async def setpairs_command(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    """Create a time-boxed pairs competition round — COACHES ONLY.
+    """Create a time-boxed pairs competition round — COACHES & PAIRS ADMINS.
+
+    Permitted for coaches AND anyone listed in ``PAIRS_ADMIN_IDS``
+    (:meth:`Settings.can_manage_pairs`); ``/setplan`` remains coach-only.
 
     Usage::
 
@@ -574,7 +583,7 @@ async def setpairs_command(
             )
             return
 
-        if not settings.is_coach(caller.id):
+        if not settings.can_manage_pairs(caller.id):
             await _safe_reply(message, _PAIRS_COACH_ONLY_MSG)
             return
 
@@ -687,10 +696,12 @@ async def setpairs_command(
 async def pairs_command(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    """Show (or stop) the CURRENT pairs round — COACHES ONLY.
+    """Show (or stop) the CURRENT pairs round — COACHES & PAIRS ADMINS.
 
-    Uses the same coach guard as ``/setplan`` (:meth:`Settings.is_coach`) and the
-    same aggregation/formatting as the scheduled final board.
+    Permitted for coaches AND anyone listed in ``PAIRS_ADMIN_IDS``
+    (:meth:`Settings.can_manage_pairs`) — a narrower role than ``/setplan``,
+    which stays coach-only. Uses the same aggregation/formatting as the
+    scheduled final board.
 
     - ``/pairs`` → live standings of the active round, over the round's OWN
       window (see :func:`setpairs_command`). When no round is active it says so
@@ -718,7 +729,7 @@ async def pairs_command(
             )
             return
 
-        if not settings.is_coach(caller.id):
+        if not settings.can_manage_pairs(caller.id):
             await _safe_reply(message, _PAIRS_COACH_ONLY_MSG)
             return
 

@@ -643,16 +643,19 @@ for you.` and does nothing. Coaches can set or view **other** members' plans.
 - **`/whoami`** — replies with your (or, when used as a reply, the replied-to
   user's) Telegram id and name, so coaches can discover member IDs for
   `COACH_IDS` and for username resolution.
-- **`/setpairs <duration> <pair> …`** — **coach-only**: starts a time-boxed pairs
+- **`/setpairs <duration> <pair> …`** — **coaches and pairs admins** (anyone in
+  `COACH_IDS` *or* `PAIRS_ADMIN_IDS`): starts a time-boxed pairs
   round, e.g. `/setpairs 1w @alice+@bob @carol+@dave`. See
   [Pairs leaderboard](#pairs-leaderboard). Nothing is saved unless every pair is
   valid; running it again replaces any active round.
-- **`/pairs`** — **coach-only** (same `COACH_IDS` check as `/setplan`): replies
+- **`/pairs`** — **coaches and pairs admins** (`COACH_IDS` *or*
+  `PAIRS_ADMIN_IDS`; note this is a *wider* set than the coach-only `/setplan`):
+  replies
   with the **live standings of the active round**, over the round's own window,
   using the same formatting as the scheduled board, with the round's dates and
   status appended (e.g. `(2026-09-07 – 2026-09-13, in progress)`). With no active
-  round it says so and points you at `/setpairs`. Non-coaches get a short "coach
-  only" message. Like `/setplan`, it is intentionally **not** advertised in the
+  round it says so and points you at `/setpairs`. Anyone else gets a short
+  "coach or pairs organiser only" message. Like `/setplan`, it is intentionally **not** advertised in the
   public command menu.
 - **`/pairs stop`** — ends the active round immediately: no final board is posted
   and pairs stop being tracked. `cancel` and `end` are aliases and the argument is
@@ -679,6 +682,7 @@ for you.` and does nothing. Coaches can set or view **other** members' plans.
 | `LATE_SUBMISSION_GRACE_UNTIL_HOUR` | ❌ | `9` | The Monday hour (0–23, local `TIMEZONE`) until which a workout dated in the **just-finished** Mon–Sun week is still accepted and scored — the default `9` matches the Mon 09:00/09:05 leaderboards. The row keeps its real `workout_date`, so it counts toward the week being reported. Set to `0` to disable (strict current-week-only). Malformed values (non-integer or outside 0–23) fail fast with a `ConfigError`. |
 | `COACH_IDS` | ❌ | *(empty)* | Comma-separated Telegram user IDs (e.g. `123,456`) allowed to set up workouts/plans. Only coaches can run `/setplan`; regular users cannot set up their own workouts. Blank/unset → no coaches (nobody can set plans). Non-integer entries are skipped with a warning. Use `/whoami` (reply to a member) to find IDs. |
 | ~~`PAIRS`~~ | — | *(removed)* | **No longer used.** Pairs are now created by a coach with `/setpairs` and last only for the duration they specify — see [Pairs leaderboard](#pairs-leaderboard). If this variable is still set the bot logs a warning at startup and ignores it; you can safely delete it. |
+| `PAIRS_ADMIN_IDS` | ❌ | *(empty)* | Comma-separated Telegram user IDs (e.g. `123,456`) allowed to manage the **pairs competition** (`/setpairs`, `/pairs`, `/pairs stop`) **without being a coach**. A strictly narrower role than `COACH_IDS`: a pairs admin **cannot** run `/setplan` or view another member's plan. Coaches always keep pairs access too. Blank/unset → only coaches can manage pairs. Non-integer entries are skipped with a warning. Use `/whoami` (reply to a member) to find IDs. |
 | `LOG_LEVEL` | ❌ | `INFO` | `DEBUG`/`INFO`/`WARNING`/`ERROR`. |
 
 See [`.env.example`](.env.example) for a copy-paste template.
