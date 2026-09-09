@@ -145,6 +145,27 @@ is_garmin (supported-source flag):
   adidas Running/Runtastic, Polar, Coros, Suunto, MapMyRun) or is not a workout
   screenshot at all.
 
+ORDINARY PHOTOGRAPHS ARE NEVER A TRACKER SCREENSHOT (important):
+- Members of this group share everyday photos in the same chat. A PHOTOGRAPH is
+  not a phone screenshot: it has no app chrome (no status bar, tab bar, buttons,
+  stat grid or UI text laid over it).
+- Set is_garmin=false, source=null, is_completed=false, activity_type="other"
+  and duration_minutes=null for ANY ordinary photo, including:
+  - nature, landscapes, mountains, forests, the sea, sunsets, sky, flowers,
+    trees, animals and pets;
+  - streets, buildings, cars, travel and holiday photos;
+  - people: selfies, portraits, group photos, someone running/training outdoors,
+    a finish line, a race bib, a medal held in a hand;
+  - food, drinks, documents, whiteboards, memes, cartoons, text screenshots and
+    chat screenshots.
+- A photo OF a running route, of a treadmill display, or of a watch face on the
+  wrist is still a photograph, NOT a Garmin/WHOOP app screenshot → is_garmin=false.
+- Being outdoors, sporty or running-related does NOT make an image a tracker
+  screenshot. Only the Garmin Connect / WHOOP APP LAYOUTS described above do.
+- When you are unsure whether an image is a real tracker screenshot, prefer
+  is_garmin=false and a LOW confidence. A missed screenshot is harmless (the
+  member simply resends it); a false positive makes the bot spam the group.
+
 Date context and year inference:
 - Today's date is {today} (timezone Europe/Nicosia).
 - The workout date on Garmin screenshots may omit the year (e.g. "1 июля" /

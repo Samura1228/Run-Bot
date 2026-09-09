@@ -25,6 +25,11 @@ Replies are gated on whether the image is a supported tracker screenshot at all
 * NOT a Garmin/WHOOP screenshot (holiday snap, meme, another app), an unusable
   vision verdict, a low-confidence verdict, or a duplicate re-submission →
   **completely silent**, observable via logs only.
+* Flagged ``is_garmin`` but carrying no readable tracker detail at all (no
+  ``source``, title, distance or duration) → also **silent**. ``is_garmin`` is
+  occasionally a false positive on an ordinary photograph, and warning about a
+  landscape is precisely the spam this policy exists to avoid; see
+  :func:`_has_tracker_evidence`.
 * IS a Garmin/WHOOP screenshot but earns no points (outside the counted week,
   below the minimum duration, summary/achievements screen, unreadable duration
   or date, failed Sheet write) → a short, friendly explanation via
@@ -90,6 +95,38 @@ async def _safe_reply(message, text: str) -> None:
         logger.error("Failed to send reply: %s", exc)
     except Exception as exc:  # pragma: no cover - defensive
         logger.error("Unexpected error sending reply: %s", exc)
+
+
+def _has_tracker_evidence(verdict) -> bool:
+    """Return True if the verdict carries positive evidence of a tracker screen.
+
+    ``is_garmin`` alone is the model's yes/no judgement, and it is occasionally
+    a FALSE POSITIVE on an ordinary photograph (a landscape, a race snapshot, a
+    photo of a watch face). Replying "couldn't confirm a workout" to a holiday
+    photo is exactly the spam the silent-by-default policy exists to prevent, so
+    before any such warning we require at least ONE concrete thing the model
+    actually read off the screen:
+
+    * ``source`` — it identified the app as Garmin or WHOOP, or
+    * ``activity_title`` — it read an on-screen activity title, or
+    * ``distance`` / ``duration`` / ``duration_minutes`` — it read a real metric.
+
+    A genuine tracker screenshot essentially always yields at least one of
+    these, even when the workout itself can't be confirmed. A nature photo
+    yields none of them. ``workout_date`` is deliberately NOT accepted as
+    evidence: by this point it may be the submission-date fallback the handler
+    filled in, which says nothing about the image.
+    """
+
+    return any(
+        (
+            verdict.source,
+            (verdict.activity_title or "").strip(),
+            (verdict.distance or "").strip(),
+            (verdict.duration or "").strip(),
+            verdict.duration_minutes is not None,
+        )
+    )
 
 
 class PhotoHandler:
@@ -245,6 +282,10 @@ class PhotoHandler:
         # basis for telling someone their screenshot was wrong.
         if not verdict.is_eligible(self._settings.min_confidence):
             low_confidence = verdict.confidence < self._settings.min_confidence
+            # Second line of defence against warning about an ordinary photo:
+            # even with is_garmin=true, stay silent unless the model actually
+            # read something off the screen (see _has_tracker_evidence).
+            no_evidence = not _has_tracker_evidence(verdict)
             logger.info(
                 "Verdict not eligible (supported=%s source=%s type=%s "
                 "completed=%s date=%s conf=%.2f); rejecting%s.",
@@ -254,9 +295,11 @@ class PhotoHandler:
                 verdict.is_completed,
                 verdict.workout_date,
                 verdict.confidence,
-                " silently (low confidence)" if low_confidence else "",
+                " silently (low confidence)"
+                if low_confidence
+                else (" silently (no tracker evidence)" if no_evidence else ""),
             )
-            if not low_confidence:
+            if not low_confidence and not no_evidence:
                 await _safe_reply(
                     message,
                     "⚠️ Couldn't confirm a completed workout in this screenshot "
@@ -271,6 +314,17 @@ class PhotoHandler:
         # is told so instead of being ignored.
         activity = verdict.activity_type
         if activity != "running" and activity not in BONUS_ACTIVITIES:
+            # Same evidence guard: "other" is also what the model returns for an
+            # ordinary photo it wrongly flagged as a tracker screen, so only
+            # tell someone their activity doesn't score when the screenshot
+            # really looks like one.
+            if not _has_tracker_evidence(verdict):
+                logger.info(
+                    "Activity type %r with no tracker evidence (likely an "
+                    "ordinary photo); ignoring silently.",
+                    activity,
+                )
+                return
             logger.info(
                 "Activity type %r is not awardable; rejecting.",
                 activity,

@@ -555,6 +555,7 @@ photos in the group never triggers a single bot message.
 | **Not a Garmin/WHOOP screenshot** — nature photos, selfies, memes, food, screenshots from other apps (Strava, Nike Run Club, Apple Fitness…) |
 | Screenshot too unclear/unreadable for the bot to identify |
 | Recognized as a workout only with **low confidence** (below `MIN_CONFIDENCE`) |
+| Flagged as a tracker screenshot but with **nothing actually read off it** — no app identified, no activity title, no distance and no duration. This is the false-positive guard: an ordinary photo the model wrongly flags still earns **no reply** |
 | **Duplicate** re-submission of a screenshot already logged |
 
 **💬 Replies with a short reason** — only for real Garmin/WHOOP screenshots, so
