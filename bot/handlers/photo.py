@@ -3,8 +3,8 @@
 Orchestrates the full pipeline for photo messages:
 download → hash → dedup → vision → decision → log + reply.
 
-Screenshots from BOTH supported apps — Garmin Connect and WHOOP — flow through
-this single pipeline and score identically. WHOOP workout screens often show
+Screenshots from ALL supported apps — Garmin Connect, Strava and WHOOP — flow
+through this single pipeline and score identically. WHOOP workout screens often show
 only a time-of-day range with no date, so a missing ``workout_date`` falls back
 to the submission (message) date instead of being rejected.
 
@@ -22,7 +22,7 @@ to, read back after the write so it includes the points just awarded.
 Replies are gated on whether the image is a supported tracker screenshot at all
 (``verdict.is_garmin``), so the group is never spammed about ordinary photos:
 
-* NOT a Garmin/WHOOP screenshot (holiday snap, meme, another app), an unusable
+* NOT a supported tracker screenshot (holiday snap, meme, another app), an unusable
   vision verdict, a low-confidence verdict, or a duplicate re-submission →
   **completely silent**, observable via logs only.
 * Flagged ``is_garmin`` but carrying no readable tracker detail at all (no
@@ -30,7 +30,7 @@ Replies are gated on whether the image is a supported tracker screenshot at all
   occasionally a false positive on an ordinary photograph, and warning about a
   landscape is precisely the spam this policy exists to avoid; see
   :func:`_has_tracker_evidence`.
-* IS a Garmin/WHOOP screenshot but earns no points (outside the counted week,
+* IS a Garmin/Strava/WHOOP screenshot but earns no points (outside the counted week,
   below the minimum duration, summary/achievements screen, unreadable duration
   or date, failed Sheet write) → a short, friendly explanation via
   :func:`_safe_reply`, so someone who really did post a workout is never left
@@ -107,7 +107,7 @@ def _has_tracker_evidence(verdict) -> bool:
     before any such warning we require at least ONE concrete thing the model
     actually read off the screen:
 
-    * ``source`` — it identified the app as Garmin or WHOOP, or
+    * ``source`` — it identified the app as Garmin, Strava or WHOOP, or
     * ``activity_title`` — it read an on-screen activity title, or
     * ``distance`` / ``duration`` / ``duration_minutes`` — it read a real metric.
 
@@ -219,13 +219,13 @@ class PhotoHandler:
         # a photo of the road, another app...) → stay COMPLETELY SILENT. The
         # group shares ordinary photos all the time and must not be spammed with
         # "couldn't confirm a workout" warnings. ``is_garmin`` is the vision
-        # contract's supported-source flag (true for Garmin Connect OR WHOOP);
+        # contract's supported-source flag (true for Garmin, Strava OR WHOOP);
         # it is false precisely when the image is from a different app or is not
         # a workout screenshot at all. Every reply below this point therefore
-        # only ever goes to someone who really did post a Garmin/WHOOP screen.
+        # only ever goes to someone who really did post a supported screen.
         if not verdict.is_garmin:
             logger.info(
-                "Photo from user %s is not a Garmin/WHOOP screenshot "
+                "Photo from user %s is not a supported tracker screenshot "
                 "(source=%s type=%s conf=%.2f); ignoring silently.",
                 user.id,
                 verdict.source,
@@ -235,8 +235,8 @@ class PhotoHandler:
             return
 
         # 5a) Reject summary screens explicitly (not a completed-workout
-        # summary): Garmin achievements/badges/personal-records screens AND
-        # WHOOP daily overviews (day Strain / Recovery / Sleep / Health
+        # summary): Garmin achievements/badges/personal-records screens, Strava
+        # feed/stats/segment screens AND WHOOP daily overviews (day Strain / Recovery / Sleep / Health
         # Monitor / coach cards). Unlike other non-eligible verdicts, this one
         # gets a clear user-facing reply so the poster knows to send the
         # workout summary instead — and NO points are awarded / row written.
@@ -251,7 +251,7 @@ class PhotoHandler:
                 message,
                 "⚠️ This looks like a summary/achievements screen, not a "
                 "completed workout. Please send the workout summary "
-                "screenshot from Garmin or WHOOP.",
+                "screenshot from Garmin, Strava or WHOOP.",
             )
             return
 
@@ -275,7 +275,7 @@ class PhotoHandler:
                 update={"workout_date": fallback.isoformat()}
             )
 
-        # 5b) Eligibility. Reaching here means it IS a Garmin/WHOOP screenshot
+        # 5b) Eligibility. Reaching here means it IS a supported screenshot
         # (gate 4b above), so a reply is warranted: the poster tried to log a
         # workout and deserves to know why it earned nothing. A low-confidence
         # verdict stays silent, since "barely recognizable" is not a reliable
@@ -304,7 +304,7 @@ class PhotoHandler:
                     message,
                     "⚠️ Couldn't confirm a completed workout in this screenshot "
                     "— no points awarded. Please send the workout summary "
-                    "screenshot from Garmin or WHOOP.",
+                    "screenshot from Garmin, Strava or WHOOP.",
                 )
             return
 

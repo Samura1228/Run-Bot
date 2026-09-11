@@ -6,7 +6,7 @@ whenever someone posts a **photo**, it:
 1. Downloads the image and hashes it (to prevent duplicate submissions).
 2. Sends it to **Claude vision** to check whether it's a **completed workout
    screenshot from Garmin Connect or WHOOP** (see
-   [Supported screenshots](#supported-screenshots-garmin--whoop)), classify the
+   [Supported screenshots](#supported-screenshots-garmin-strava--whoop)), classify the
    **activity** (running / walking / cycling / strength) and extract the workout
    date + duration.
 3. If it's a valid activity **dated within the current Mon–Sun week** (Cyprus
@@ -22,7 +22,7 @@ whenever someone posts a **photo**, it:
      **separate bonus points** — they don't affect the running plan or streak.
 
    **Ordinary photos are ignored completely** — post holiday snaps, memes or
-   anything that isn't a Garmin/WHOOP screenshot and the bot says **nothing**, so
+   anything that isn't a supported tracker screenshot and the bot says **nothing**, so
    the group is never spammed. But if you *did* post a real Garmin/WHOOP
    screenshot that earns no points (wrong week, below the minimum duration, a
    **summary/achievements screen**, unreadable duration), it replies with a short
@@ -46,7 +46,7 @@ Google Sheets is the **single source of truth**, so restarts never lose data.
 
 ## Table of Contents
 
-0. [Supported screenshots (Garmin & WHOOP)](#supported-screenshots-garmin--whoop)
+0. [Supported screenshots (Garmin, Strava & WHOOP)](#supported-screenshots-garmin-strava--whoop)
 1. [Prerequisites](#prerequisites)
 2. [Step 1 — Create the Telegram bot](#step-1--create-the-telegram-bot)
 3. [Step 2 — Get the group chat ID](#step-2--get-the-group-chat-id)
@@ -61,11 +61,11 @@ Google Sheets is the **single source of truth**, so restarts never lose data.
 
 ---
 
-## Supported screenshots (Garmin & WHOOP)
+## Supported screenshots (Garmin, Strava & WHOOP)
 
-The bot accepts workout screenshots from **two** apps, and they score
+The bot accepts workout screenshots from **three** apps, and they score
 **identically** — same plan-based running points, same flat bonuses, same
-minimum durations. There is no separate WHOOP scoring path.
+minimum durations. There is no separate scoring path per app.
 
 ### Garmin Connect
 
@@ -73,6 +73,26 @@ English **and** Russian UI activity-detail screens: an activity title + date/tim
 a route map with the low→high pace heat-map legend, and the stat grid
 (Distance/Расстояние, Avg Pace/Средний темп, Total Time/Общее время, HR,
 Calories). Nothing about this changed.
+
+### Strava
+
+Strava **activity detail** screens, in any UI language. Recognized by Strava's
+orange accent/wordmark, a time-of-day activity title (**Morning Run**, *Afternoon
+Ride*, *Evening Walk*, or a name the athlete typed), the athlete's name/avatar
+and date line, the **Distance / Pace / Time** stat row, a route map with an
+orange route line, and the social UI (kudos, comments, segments, achievements).
+
+Two Strava specifics the bot handles for you:
+
+- **The activity title decides the sport.** Strava's default names combine a
+  time of day with the sport, so the bot matches the *sport* word and ignores
+  the time-of-day word — `Morning Run` is a run, not a "morning".
+- **Durations are re-derived in code.** Strava drops the leading zero hour, so
+  `43:12` means **43 minutes**, not 43 hours, while `1:08:51` means 68 minutes.
+  The bot re-parses the time string itself rather than trusting the reading, and
+  strips any pace value (`5:23 /km`) first — pace looks exactly like an `MM:SS`
+  duration and sits right next to the time on screen. Seconds are truncated, so
+  a 39:59 walk is 39 minutes and misses the 40-minute minimum.
 
 ### WHOOP
 
@@ -115,7 +135,7 @@ stages), **Health Monitor**, and coach/insight summary cards — same as Garmin
 achievements/badges screens. The bot replies:
 
 ```
-⚠️ This looks like a summary/achievements screen, not a completed workout. Please send the workout summary screenshot from Garmin or WHOOP.
+⚠️ This looks like a summary/achievements screen, not a completed workout. Please send the workout summary screenshot from Garmin, Strava or WHOOP.
 ```
 
 The rule: a **single workout** screen has ONE activity title + `DURATION` + the
@@ -552,22 +572,22 @@ photos in the group never triggers a single bot message.
 
 | Situation |
 | --- |
-| **Not a Garmin/WHOOP screenshot** — nature photos, selfies, memes, food, screenshots from other apps (Strava, Nike Run Club, Apple Fitness…) |
+| **Not a supported screenshot** — nature photos, selfies, memes, food, screenshots from other apps (Nike Run Club, Apple Fitness, Runtastic, Polar, Coros…) |
 | Screenshot too unclear/unreadable for the bot to identify |
 | Recognized as a workout only with **low confidence** (below `MIN_CONFIDENCE`) |
 | Flagged as a tracker screenshot but with **nothing actually read off it** — no app identified, no activity title, no distance and no duration. This is the false-positive guard: an ordinary photo the model wrongly flags still earns **no reply** |
 | **Duplicate** re-submission of a screenshot already logged |
 
-**💬 Replies with a short reason** — only for real Garmin/WHOOP screenshots, so
+**💬 Replies with a short reason** — only for real supported tracker screenshots, so
 someone who genuinely logged a workout always learns why it scored nothing:
 
 | Situation | Reply |
 | --- | --- |
 | Dated outside the counted window | `⚠️ This workout is dated {date}, which is outside the week we're currently counting. Points can only be added for the current week.` |
-| Recognized as Garmin/WHOOP but no completed workout confirmed | `⚠️ Couldn't confirm a completed workout in this screenshot — no points awarded. Please send the workout summary screenshot from Garmin or WHOOP.` |
+| Recognized as Garmin/WHOOP but no completed workout confirmed | `⚠️ Couldn't confirm a completed workout in this screenshot — no points awarded. Please send the workout summary screenshot from Garmin, Strava or WHOOP.` |
 | Activity type that earns nothing (e.g. swimming) | `⚠️ This activity type doesn't earn points. Points are awarded for running, walking, cycling and strength workouts.` |
 | Workout date couldn't be parsed | `⚠️ Couldn't read the workout date — no points awarded.` |
-| Summary/achievements screen | `⚠️ This looks like a summary/achievements screen, not a completed workout. Please send the workout summary screenshot from Garmin or WHOOP.` |
+| Summary/achievements screen | `⚠️ This looks like a summary/achievements screen, not a completed workout. Please send the workout summary screenshot from Garmin, Strava or WHOOP.` |
 | Bonus activity, duration unreadable | `⚠️ Couldn't read the duration — no points awarded.` |
 | Bonus activity below its minimum duration | `⚠️ {Walk\|Ride\|Strength/stretch} is {N} min — minimum is {M} min to earn points.` |
 | Sheet write failed after retries | `⚠️ Couldn't save this workout just now — please send the screenshot again in a few minutes.` |

@@ -27,17 +27,18 @@ logger = logging.getLogger(__name__)
 # WHOOP screenshot omits the year.
 _SYSTEM_PROMPT_TEMPLATE = """You are an image verification assistant for a fitness club.
 You will be shown a single screenshot. Determine whether it is a workout
-screenshot from a SUPPORTED tracker app — **Garmin Connect** OR **WHOOP** — for
-a COMPLETED (not planned/scheduled) activity, decide whether it is instead a
-summary screen (achievements/badges, or a WHOOP daily overview), classify the
-activity type, and extract structured details.
+screenshot from a SUPPORTED tracker app — **Garmin Connect**, **Strava** OR
+**WHOOP** — for a COMPLETED (not planned/scheduled) activity, decide whether it
+is instead a summary screen (achievements/badges, a Strava feed/stats screen, or
+a WHOOP daily overview), classify the activity type, and extract structured
+details.
 
 Respond with a SINGLE valid JSON object and NOTHING else — no markdown, no code
 fences, no commentary. Use exactly this schema and these keys:
 
 {{
-  "is_garmin": boolean,        // true if this is a screenshot from a SUPPORTED app — Garmin Connect OR WHOOP (recognized by its layout — see below)
-  "source": string|null,       // "garmin", "whoop", or null when the app is unclear
+  "is_garmin": boolean,        // true if this is a screenshot from a SUPPORTED app — Garmin Connect, Strava OR WHOOP (recognized by its layout — see below)
+  "source": string|null,       // "garmin", "strava", "whoop", or null when the app is unclear
   "is_achievement": boolean,   // true if this is a summary screen rather than ONE completed activity: achievements/badges/awards, OR a WHOOP daily overview (Strain/Recovery/Sleep/Health Monitor/coach card) — see below
   "activity_title": string|null, // the activity title EXACTLY as shown, e.g. "WALKING", "STRENGTH TRAINER", "Бег", else null
   "activity_type": string,     // one of: "running", "walking", "cycling", "strength", "other" (see classification below)
@@ -67,6 +68,42 @@ Recognizing Garmin Connect (source="garmin"):
     Rate (Средняя частота пульса, уд/м), Avg Pace (Средний темп, /км), Total
     Time (Общее время), Calories (Всего калорий).
   - Garmin's dark-theme styling with blue accent icons next to HR/pace metrics.
+
+Recognizing Strava (source="strava"):
+- Strava's activity detail screen is the one to ACCEPT. Visual signatures (ANY
+  strong combination indicates Strava):
+  - Strava's signature **orange** accent colour (#FC4C02) on buttons, the logo
+    wordmark "STRAVA", or an orange app bar.
+  - An **activity title** in normal sentence case at the top — Strava's default
+    names are time-of-day based: "Morning Run", "Lunch Run", "Afternoon Ride",
+    "Evening Walk", "Night Run", localized equivalents ("Пробежка утром",
+    "Утренняя пробежка"), or a name the athlete typed themselves.
+  - The athlete's **name + avatar** and a **date/time line** under the title
+    (e.g. "8 July 2026 at 07:42").
+  - A headline stat row **Distance / Pace / Time** (often "Elapsed Time" or
+    "Moving Time"), with pace shown per km (e.g. "5:23 /km").
+  - A route map, frequently with an orange/red route line.
+  - Social/engagement UI unique to Strava: a **kudos** (thumbs-up) count,
+    comment count, "Give kudos", segment lists, "Achievements", relative effort,
+    or a splits/laps table.
+- A Strava activity detail screen showing ONE activity's title + date +
+  distance/time is a COMPLETED workout: set is_garmin=true, source="strava",
+  is_achievement=false, is_completed=true.
+
+Rejecting Strava feed / stats / segment screens:
+- Strava also has screens that are NOT one completed activity and must NOT be
+  scored. Set is_achievement=true, is_completed=false, activity_type="other"
+  and duration_minutes=null for:
+  - The **activity FEED** — a scrollable list of SEVERAL activities, often from
+    different athletes, each as its own card. More than one activity on screen
+    means a feed, not an activity.
+  - **Profile / stats / training-log** screens: weekly or monthly totals, "This
+    Week", bar charts of distance per week, "Year in Sport" recaps.
+  - **Segment leaderboards**, KOM/QOM/CR boards, club rankings.
+  - **Challenge / trophy / badge** pages and achievement grids.
+- Distinguishing rule: an ACTIVITY DETAIL screen shows ONE title with ONE set of
+  distance/time/pace for that single activity. A feed shows several cards; a
+  stats screen shows totals over a period rather than one workout.
 
 Recognizing a WHOOP single-activity workout screen (source="whoop"):
 - WHOOP's workout detail screen (English UI, dark theme) has this structure —
@@ -137,13 +174,14 @@ Distinguishing an achievements/badges screen from a completed-activity summary
   single-activity layout (title + ACTIVITY STRAIN + DURATION + zone breakdown).
 
 is_garmin (supported-source flag):
-- Judge is_garmin by the Garmin Connect OR WHOOP layouts described above, NOT by
-  whether the literal words "Garmin"/"WHOOP" appear on screen. Set
-  is_garmin=true for BOTH apps (and set "source" accordingly).
+- Despite its name this flag means "is a screenshot from a SUPPORTED app".
+  Judge it by the Garmin Connect, Strava OR WHOOP layouts described above, NOT
+  by whether the literal words "Garmin"/"Strava"/"WHOOP" appear on screen. Set
+  is_garmin=true for ALL THREE apps (and set "source" accordingly).
 - Only set is_garmin=false when the screenshot is clearly from a DIFFERENT app
-  (e.g. Strava's orange branding, Nike Run Club, Apple Fitness/Activity rings,
-  adidas Running/Runtastic, Polar, Coros, Suunto, MapMyRun) or is not a workout
-  screenshot at all.
+  (e.g. Nike Run Club, Apple Fitness/Activity rings, adidas Running/Runtastic,
+  Polar, Coros, Suunto, MapMyRun, Komoot) or is not a workout screenshot at
+  all.
 
 ORDINARY PHOTOGRAPHS ARE NEVER A TRACKER SCREENSHOT (important):
 - Members of this group share everyday photos in the same chat. A PHOTOGRAPH is
@@ -178,6 +216,9 @@ Date context and year inference:
   "8:12 PM to 9:11 PM") with NO date at all. Do NOT invent one: return
   workout_date=null in that case (the bot then falls back to the submission
   date). A time range alone is NEVER a date.
+- Strava activity screens normally show a full date under the title (e.g.
+  "8 July 2026 at 07:42", "Сегодня в 7:42"). Use it. If it says "Today" /
+  "Yesterday" / "Сегодня" / "Вчера", resolve it against today's date above.
 - Always return workout_date in strict ISO YYYY-MM-DD.
 
 Activity classification (activity_type):
@@ -197,6 +238,20 @@ Activity classification (activity_type):
     (the "strength" category covers strength training AND
     stretching/yoga/mobility work)
   - Anything else (e.g. swimming/плавание, or unclear) → "other"
+- Strava activity title cues (Strava names activities by TIME OF DAY plus the
+  sport, and the athlete may rename them — match the SPORT word anywhere in the
+  title, and use the activity icon/pace units to confirm):
+  - "... Run" / "Run" / "Runing"/"Running" / "Пробежка" / "Бег" / treadmill →
+    "running"
+  - "... Walk" / "Walk" / "Hike" / "Ходьба" / "Прогулка" → "walking"
+  - "... Ride" / "Ride" / "Cycling" / "Bike" / "Велозаезд" / "Велопрогулка" /
+    "Велотренировка" → "cycling"
+  - "Weight Training" / "Workout" / "Strength" / "Yoga" / "Pilates" /
+    "Stretching" / "Силовая" / "Йога" → "strength"
+  - Any other sport (e.g. "Swim", "Row", "Ski") → "other"
+  - Time-of-day words ("Morning", "Lunch", "Afternoon", "Evening", "Night",
+    "Утренняя", "Вечерняя") are NOT the sport — ignore them and classify by the
+    sport word next to them.
 - WHOOP activity title cues (the ALL-CAPS title at the top of the screen):
   - RUNNING / RUN / TRAIL RUNNING / TREADMILL → "running"
   - WALKING / WALK / HIKING / HIKE → "walking"
@@ -213,6 +268,19 @@ Duration extraction (duration and duration_minutes):
 - Garmin: "duration_minutes" is that time as a whole number of MINUTES, rounded
   to the nearest minute. Examples: "1:08:51" → 69; "00:28:14" → 28;
   "45 мин" / "45 min" → 45; "1:30:00" → 90.
+- Strava: the authoritative duration is the **"Time"**, **"Moving Time"** or
+  **"Elapsed Time"** stat (prefer "Moving Time" when both are shown). Strava
+  writes it WITHOUT a leading zero-hour, so the number of parts decides the
+  unit and you MUST NOT confuse them:
+  - TWO parts "MM:SS" → that is MINUTES and seconds. "43:12" is 43 minutes
+    (NOT 43 hours), "28:14" → 28, "59:47" → 59, "07:30" → 7.
+  - THREE parts "H:MM:SS" → hours, minutes, seconds. "1:08:51" → 69,
+    "2:00:00" → 120.
+  Drop the seconds in both cases. A run of "43:12" giving duration_minutes=2592
+  is always wrong — sanity-check that duration_minutes is plausible for the
+  activity (a run is minutes to a few hours, never days).
+- Strava: copy the time string into "duration" EXACTLY as shown (e.g. "43:12"),
+  so the bot can re-derive the minutes itself.
 - WHOOP: the authoritative duration is the **"DURATION H:MM:SS"** value in the
   row next to "TYPICAL RANGE". Use ONLY that value — NOT the per-zone times in
   the ZONE 0-5 breakdown, and NOT the wall-clock time range under the title.
@@ -222,12 +290,12 @@ Duration extraction (duration and duration_minutes):
   duration_minutes=null (and duration=null).
 
 Rules:
-- is_garmin: true for a Garmin Connect OR WHOOP workout layout as described
-  above (the literal app name need not be visible).
-- source: "garmin" or "whoop" when identifiable, otherwise null.
+- is_garmin: true for a Garmin Connect, Strava OR WHOOP workout layout as
+  described above (the literal app name need not be visible).
+- source: "garmin", "strava" or "whoop" when identifiable, otherwise null.
 - is_achievement: true ONLY for achievements/badges/awards/personal-records
-  screens or WHOOP daily-overview (Strain/Recovery/Sleep/Health Monitor/coach)
-  screens as described above; for a normal single completed-activity summary it
+  screens, Strava feed/stats/segment/challenge screens, or WHOOP daily-overview
+  (Strain/Recovery/Sleep/Health Monitor/coach) screens as described above; for a normal single completed-activity summary it
   is false. Such a screen is never a completed workout, so when
   is_achievement=true you MUST also set is_completed=false.
 - is_completed: true only when the screenshot shows real recorded data for a
@@ -364,10 +432,97 @@ def parse_hms_minutes(text: Optional[str]) -> Optional[int]:
     return hours * 60 + minutes
 
 
-def _normalize_verdict(verdict: VisionVerdict) -> VisionVerdict:
-    """Apply WHOOP-specific normalization to a validated verdict.
+# Strava names activities by TIME OF DAY plus the sport ("Morning Run",
+# "Afternoon Ride"), and athletes freely rename them, so — unlike the exact
+# WHOOP title map — Strava titles are matched by SUBSTRING against these sport
+# keywords. Order matters: the first hit wins, so longer/more specific phrases
+# are listed before the generic single words they contain.
+STRAVA_TITLE_KEYWORDS: tuple[tuple[str, str], ...] = (
+    # running
+    ("trail run", "running"), ("treadmill", "running"), ("running", "running"),
+    ("run", "running"), ("пробежка", "running"), ("бег", "running"),
+    # walking
+    ("walking", "walking"), ("walk", "walking"), ("hiking", "walking"),
+    ("hike", "walking"), ("ходьба", "walking"), ("прогулка", "walking"),
+    # cycling
+    ("indoor cycling", "cycling"), ("cycling", "cycling"), ("ride", "cycling"),
+    ("biking", "cycling"), ("bike", "cycling"), ("вело", "cycling"),
+    # strength / mobility
+    ("weight training", "strength"), ("weightlifting", "strength"),
+    ("strength", "strength"), ("crossfit", "strength"), ("hiit", "strength"),
+    ("pilates", "strength"), ("yoga", "strength"), ("stretching", "strength"),
+    ("mobility", "strength"), ("workout", "strength"), ("силов", "strength"),
+    ("йога", "strength"), ("растяжка", "strength"),
+)
 
-    Garmin verdicts are returned untouched. For WHOOP verdicts:
+# "MM:SS" — exactly two parts. Strava writes sub-hour durations this way, so
+# "43:12" is 43 MINUTES, not 43 hours. Anchored with (?<!\d)/(?!\d) and a
+# negative lookahead for a third ":" group so an "H:MM:SS" value never matches.
+_MS_RE = re.compile(r"(?<![\d:])(\d{1,3}):([0-5]\d)(?![\d:])")
+
+# A PACE value — a time immediately followed by a per-distance unit, e.g.
+# "5:23 /km", "8:40/mi", "5:23 мин/км". Strava prints pace directly beside the
+# time on the activity screen, and pace is itself an "MM:SS" value, so it MUST
+# be stripped before parsing a duration: otherwise a 43-minute run whose
+# duration string happened to include the pace would be read as 5 minutes.
+_PACE_RE = re.compile(
+    r"(?<![\d:])\d{1,3}:[0-5]\d\s*(?:мин\s*)?/\s*(?:km|mi|mile|км|ми)\b",
+    re.IGNORECASE,
+)
+
+
+def map_strava_activity(title: Optional[str]) -> Optional[str]:
+    """Map a Strava activity title to the bot's activity type by keyword.
+
+    Strava's default titles combine a time of day with the sport ("Morning
+    Run"), and the time-of-day word must never decide the type — so this scans
+    for the first SPORT keyword in :data:`STRAVA_TITLE_KEYWORDS`. Matching is
+    case-insensitive. Returns ``None`` when the title is missing or contains no
+    known sport word (the caller then keeps whatever the model classified).
+    """
+
+    if not title:
+        return None
+    haystack = " ".join(title.strip().lower().split())
+    for keyword, activity in STRAVA_TITLE_KEYWORDS:
+        if keyword in haystack:
+            return activity
+    return None
+
+
+def parse_flexible_minutes(text: Optional[str]) -> Optional[int]:
+    """Parse a Strava duration into WHOLE minutes, handling BOTH formats.
+
+    Strava omits a leading zero hour, so the part count decides the unit:
+    ``"1:08:51"`` (H:MM:SS) → 68, while ``"43:12"`` (MM:SS) → 43 — NOT 2592.
+    Any PACE value ("5:23 /km") is stripped first, since pace is itself an
+    MM:SS value printed right next to the time on Strava's activity screen.
+    Getting this backwards would wreck the minimum-duration thresholds for the
+    bonus activities, so the code re-derives the value instead of trusting the
+    model's ``duration_minutes``. Seconds are truncated. Returns ``None`` when
+    no time value is present.
+    """
+
+    if not text:
+        return None
+    # Drop any pace value first — it looks exactly like an MM:SS duration.
+    text = _PACE_RE.sub(" ", text)
+    hms = _HMS_RE.search(text)
+    if hms is not None:
+        hours, minutes, _seconds = (int(g) for g in hms.groups())
+        return hours * 60 + minutes
+    ms = _MS_RE.search(text)
+    if ms is not None:
+        minutes, _seconds = (int(g) for g in ms.groups())
+        return minutes
+    return None
+
+
+def _normalize_verdict(verdict: VisionVerdict) -> VisionVerdict:
+    """Apply per-app normalization to a validated verdict.
+
+    Garmin verdicts are returned untouched; Strava verdicts are handled by
+    :func:`_normalize_strava`. For WHOOP verdicts:
 
     - the ALL-CAPS activity title is mapped through
       :data:`WHOOP_ACTIVITY_MAP` (case-insensitive) when it resolves to a
@@ -375,6 +530,9 @@ def _normalize_verdict(verdict: VisionVerdict) -> VisionVerdict:
     - ``duration_minutes`` is recomputed from the ``DURATION H:MM:SS`` string
       by dropping the seconds, keeping ``0:59:20`` → 59 and ``0:55:59`` → 55.
     """
+
+    if verdict.source == "strava":
+        return _normalize_strava(verdict)
 
     if verdict.source != "whoop":
         return verdict
@@ -395,6 +553,47 @@ def _normalize_verdict(verdict: VisionVerdict) -> VisionVerdict:
     if minutes is not None and minutes != verdict.duration_minutes:
         logger.info(
             "WHOOP DURATION %r parsed to %d min (model said %s).",
+            verdict.duration,
+            minutes,
+            verdict.duration_minutes,
+        )
+        updates["duration_minutes"] = minutes
+
+    if not updates:
+        return verdict
+    return verdict.model_copy(update=updates)
+
+
+def _normalize_strava(verdict: VisionVerdict) -> VisionVerdict:
+    """Normalize a Strava verdict: map the title, re-derive the duration.
+
+    Two corrections, both defensive:
+
+    - the activity type is re-derived from the title via
+      :func:`map_strava_activity`, so "Morning Run" scores as a run even if the
+      model classified it from the time-of-day word;
+    - ``duration_minutes`` is recomputed with :func:`parse_flexible_minutes`,
+      which reads Strava's "MM:SS" form correctly. The model is told the rule in
+      the prompt, but a misread here would silently mis-award points (or deny
+      them against the bonus-activity minimums), so the code checks it too.
+    """
+
+    updates: dict = {}
+
+    mapped = map_strava_activity(verdict.activity_title)
+    if mapped is not None and mapped != verdict.activity_type:
+        logger.info(
+            "Strava title %r mapped to activity_type %r (model said %r).",
+            verdict.activity_title,
+            mapped,
+            verdict.activity_type,
+        )
+        updates["activity_type"] = mapped
+
+    minutes = parse_flexible_minutes(verdict.duration)
+    if minutes is not None and minutes != verdict.duration_minutes:
+        logger.info(
+            "Strava duration %r parsed to %d min (model said %s).",
             verdict.duration,
             minutes,
             verdict.duration_minutes,
