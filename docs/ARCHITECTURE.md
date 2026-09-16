@@ -376,7 +376,7 @@ type — the handler branches on `activity_type` after this gate:
 - `activity_type == "running"` → plan-based points (Section 5).
 - `activity_type in {"walking", "cycling", "strength"}` → flat 5-point bonus,
   subject to the per-activity minimum duration (Section 5).
-- anything else (`other`/legacy) → **no points**. If the image was a supported tracker screenshot the bot replies `⚠️ This activity type doesn't earn points. Points are awarded for running, walking, cycling and strength workouts.`; if it was not a tracker screenshot at all (`is_garmin=false`) it is ignored silently — see Section 5.
+- anything else (`other`/legacy) → **no points** and **no reply**. A supported tracker screenshot of a sport the club doesn't score (swimming, rowing, tennis…) is not a run, and the bot stays silent about it rather than posting a "doesn't earn points" notice on each one; a non-tracker image (`is_garmin=false`) is silent for the same reason. Both are visible in the logs only.
 
 If gated-in, proceed to the date-window/points decision (Section 5). Otherwise IGNORE.
 
@@ -536,7 +536,6 @@ confirmed Sheet write).
 |------|-------|
 | Workout date outside the accepted window | `⚠️ This workout is dated {date}, which is outside the week we're currently counting. Points can only be added for the current week.` |
 | Not eligible for another reason (not completed) at or above the confidence threshold | `⚠️ Couldn't confirm a completed workout in this screenshot — no points awarded. Please send the workout summary screenshot from Garmin, Strava or WHOOP.` |
-| Activity type not awardable (swimming, `other`) | `⚠️ This activity type doesn't earn points. Points are awarded for running, walking, cycling and strength workouts.` |
 | `workout_date` unparseable after validation | `⚠️ Couldn't read the workout date — no points awarded.` |
 | Sheet append failed after retries | `⚠️ Couldn't save this workout just now — please send the screenshot again in a few minutes.` |
 | Summary/achievements screen (**unchanged text**) | `⚠️ This looks like a summary/achievements screen, not a completed workout. Please send the workout summary screenshot from Garmin, Strava or WHOOP.` |
@@ -568,8 +567,7 @@ function decide_and_process(message, verdict, image_hash):
 
     activity = verdict.activity_type
     if activity != "running" and activity not in BONUS_ACTIVITIES:
-        reply("⚠️ This activity type doesn't earn points. ...")
-        return REJECT
+        return IGNORE   # not a run (swimming, rowing...) — silent, log only
 
     wdate = date.fromisoformat(verdict.workout_date)
 

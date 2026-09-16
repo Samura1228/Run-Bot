@@ -30,11 +30,14 @@ Replies are gated on whether the image is a supported tracker screenshot at all
   occasionally a false positive on an ordinary photograph, and warning about a
   landscape is precisely the spam this policy exists to avoid; see
   :func:`_has_tracker_evidence`.
-* IS a Garmin/Strava/WHOOP screenshot but earns no points (outside the counted week,
-  below the minimum duration, summary/achievements screen, unreadable duration
-  or date, failed Sheet write) → a short, friendly explanation via
-  :func:`_safe_reply`, so someone who really did post a workout is never left
-  guessing.
+* A supported screenshot of a sport the club doesn't score (swimming, rowing,
+  tennis...) → also **silent**. It isn't a run, and telling people so on every
+  such post is noise.
+* IS a Garmin/Strava/WHOOP screenshot of an awardable sport but earns no points
+  (outside the counted week, below the minimum duration, summary/achievements
+  screen, unreadable duration or date, failed Sheet write) → a short, friendly
+  explanation via :func:`_safe_reply`, so someone who really did post a workout
+  is never left guessing.
 """
 
 from __future__ import annotations
@@ -314,25 +317,18 @@ class PhotoHandler:
         # is told so instead of being ignored.
         activity = verdict.activity_type
         if activity != "running" and activity not in BONUS_ACTIVITIES:
-            # Same evidence guard: "other" is also what the model returns for an
-            # ordinary photo it wrongly flagged as a tracker screen, so only
-            # tell someone their activity doesn't score when the screenshot
-            # really looks like one.
-            if not _has_tracker_evidence(verdict):
-                logger.info(
-                    "Activity type %r with no tracker evidence (likely an "
-                    "ordinary photo); ignoring silently.",
-                    activity,
-                )
-                return
+            # A real tracker screenshot of a sport the club doesn't score
+            # (swimming, rowing, tennis, skiing...) — or an ordinary photo the
+            # model wrongly flagged, which also comes back as "other". Either
+            # way this is simply not a run and gets NO reply: the group posts
+            # plenty of non-running activity and a "doesn't earn points" notice
+            # on each one is noise, not information. Observable via logs only.
             logger.info(
-                "Activity type %r is not awardable; rejecting.",
+                "Activity type %r (source=%s title=%r) is not awardable; "
+                "ignoring silently.",
                 activity,
-            )
-            await _safe_reply(
-                message,
-                "⚠️ This activity type doesn't earn points. Points are awarded "
-                "for running, walking, cycling and strength workouts.",
+                verdict.source,
+                verdict.activity_title,
             )
             return
 

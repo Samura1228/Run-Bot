@@ -577,6 +577,7 @@ photos in the group never triggers a single bot message.
 | Recognized as a workout only with **low confidence** (below `MIN_CONFIDENCE`) |
 | Flagged as a tracker screenshot but with **nothing actually read off it** — no app identified, no activity title, no distance and no duration. This is the false-positive guard: an ordinary photo the model wrongly flags still earns **no reply** |
 | **Duplicate** re-submission of a screenshot already logged |
+| A real tracker screenshot of a **sport the club doesn't score** — swimming, rowing, tennis, skiing… It isn't a run, so the bot says nothing rather than announcing "doesn't earn points" on every such post |
 
 **💬 Replies with a short reason** — only for real supported tracker screenshots, so
 someone who genuinely logged a workout always learns why it scored nothing:
@@ -585,7 +586,6 @@ someone who genuinely logged a workout always learns why it scored nothing:
 | --- | --- |
 | Dated outside the counted window | `⚠️ This workout is dated {date}, which is outside the week we're currently counting. Points can only be added for the current week.` |
 | Recognized as Garmin/WHOOP but no completed workout confirmed | `⚠️ Couldn't confirm a completed workout in this screenshot — no points awarded. Please send the workout summary screenshot from Garmin, Strava or WHOOP.` |
-| Activity type that earns nothing (e.g. swimming) | `⚠️ This activity type doesn't earn points. Points are awarded for running, walking, cycling and strength workouts.` |
 | Workout date couldn't be parsed | `⚠️ Couldn't read the workout date — no points awarded.` |
 | Summary/achievements screen | `⚠️ This looks like a summary/achievements screen, not a completed workout. Please send the workout summary screenshot from Garmin, Strava or WHOOP.` |
 | Bonus activity, duration unreadable | `⚠️ Couldn't read the duration — no points awarded.` |
