@@ -137,6 +137,7 @@ class SheetsService:
         service_account_info: dict[str, Any],
         sheet_id: str,
         season_start_date: Optional[date] = None,
+        excluded_user_ids: Optional[set[int]] = None,
     ) -> None:
         self._service_account_info = service_account_info
         self._sheet_id = sheet_id
@@ -146,6 +147,12 @@ class SheetsService:
         # registrations, or coach-assigned plans. ``None`` disables the cutoff
         # (counts every row) — used only where a season is intentionally absent.
         self._season_start_date = season_start_date
+        # Non-scoring members (the coaches): their rows are ignored by the SAME
+        # aggregation reads the season cutoff guards, so they never appear on a
+        # leaderboard, never count toward a pair, and never earn a streak bonus
+        # — WITHOUT deleting anything. Kept as strings because the sheet cells
+        # are strings and every read compares ``row[_COL_USER_ID]`` directly.
+        self._excluded_user_ids = {str(uid) for uid in (excluded_user_ids or ())}
         self._client: Optional[gspread.Client] = None
         self._worksheet: Optional[gspread.Worksheet] = None
         self._plans_worksheet: Optional[gspread.Worksheet] = None
@@ -267,6 +274,20 @@ class SheetsService:
             return False
         return workout_date < self._season_start_date
 
+    def _is_excluded(self, user_id_cell: str) -> bool:
+        """Return True if the row belongs to a non-scoring member (a coach).
+
+        Companion to :meth:`_before_season`: both are applied by every
+        points/leaderboard aggregation read so the rule lives in one place.
+        """
+
+        return user_id_cell in self._excluded_user_ids
+
+    def is_excluded_user(self, user_id: int) -> bool:
+        """Public form of :meth:`_is_excluded` for callers holding an int id."""
+
+        return str(user_id) in self._excluded_user_ids
+
     async def is_duplicate(self, user_id: int, image_hash: str) -> bool:
         """Return True if a row already exists for (user_id, image_hash).
 
@@ -314,6 +335,9 @@ class SheetsService:
             # and the leaderboard reflect only the current season.
             if self._before_season(wdate):
                 continue
+            # Coaches never score: drop their rows from every board and pair.
+            if self._is_excluded(row[_COL_USER_ID]):
+                continue
             if not in_range(wdate, start_date, end_date):
                 continue
             try:
@@ -342,6 +366,8 @@ class SheetsService:
         the per-workout points calculation and the weekly streak rollover.
         """
 
+        if self.is_excluded_user(user_id):
+            return 0
         rows = await asyncio.to_thread(self._read_all_records_sync)
         user_id_str = str(user_id)
         count = 0
@@ -381,6 +407,8 @@ class SheetsService:
         the same season cutoff the leaderboard uses.
         """
 
+        if self.is_excluded_user(user_id):
+            return 0.0
         rows = await asyncio.to_thread(self._read_all_records_sync)
         user_id_str = str(user_id)
         total = 0.0

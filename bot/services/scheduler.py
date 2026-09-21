@@ -90,6 +90,11 @@ async def evaluate_weekly_streaks(
             users[uid]["username"] = row.get("telegram_username", "")
 
     for uid, info in users.items():
+        # Coaches never score, so they never earn (or lose) a streak either.
+        # Their rows are already invisible to read_rows_in_range, but a coach
+        # can still have a Plans row — skip it rather than churn its streak.
+        if sheets.is_excluded_user(uid):
+            continue
         plan = info["plan"]
         old_streak = info["streak"]
         username = info["username"]

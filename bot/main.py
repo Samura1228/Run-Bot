@@ -59,6 +59,9 @@ def build_application(settings: Settings) -> Application:
         service_account_info=settings.google_service_account_info,
         sheet_id=settings.google_sheet_id,
         season_start_date=settings.season_start_date,
+        # Coaches never score: their rows are dropped from every board, pair
+        # and streak evaluation (and the photo handler ignores their posts).
+        excluded_user_ids=settings.coach_ids,
     )
     vision = ClaudeVisionService(
         api_key=settings.anthropic_api_key,

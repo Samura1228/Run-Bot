@@ -22,6 +22,8 @@ to, read back after the write so it includes the points just awarded.
 Replies are gated on whether the image is a supported tracker screenshot at all
 (``verdict.is_garmin``), so the group is never spammed about ordinary photos:
 
+* Posted by a COACH (``COACH_IDS``) → **completely silent** and never scored,
+  decided before the image is even downloaded. Coaches only coach.
 * NOT a supported tracker screenshot (holiday snap, meme, another app), an unusable
   vision verdict, a low-confidence verdict, or a duplicate re-submission →
   **completely silent**, observable via logs only.
@@ -172,6 +174,17 @@ class PhotoHandler:
 
         user = message.from_user
         if user is None:
+            return
+
+        # 0) Coaches never score. A coach's screenshot is ignored outright —
+        # before the download and the paid vision call — and silently, per the
+        # no-spam policy: she knows she is the coach, and the log line below is
+        # the only trace. Coaches are also excluded from every aggregation read
+        # in SheetsService, so even a historical row of theirs is never counted.
+        if self._settings.is_coach(user.id):
+            logger.info(
+                "Photo from coach %s ignored (coaches are not scored).", user.id
+            )
             return
 
         # 1) Download the largest photo's bytes.
