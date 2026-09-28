@@ -19,7 +19,7 @@ whenever someone posts a **photo**, it:
      min): `✅ Nice {walk|ride|strength session}, {name}! +5 points. //total week = {total} points`.
      Below the
      minimum it replies with a short warning and awards nothing. These are
-     **separate bonus points** — they don't affect the running plan or streak.
+     **separate bonus points** — they don't affect the running plan.
 
    **Ordinary photos are ignored completely** — post holiday snaps, memes or
    anything that isn't a supported tracker screenshot and the bot says **nothing**, so
@@ -36,7 +36,6 @@ whenever someone posts a **photo**, it:
 4. Automatically posts a **weekly pairs leaderboard** every Monday at 09:00, the
    **weekly individual leaderboard** every Monday at 09:05, and a **monthly
    leaderboard** on the 1st of each month at 09:00 (Europe/Nicosia). Both weekly
-   jobs award **streak bonuses** first (idempotently) so they are included.
 
 Google Sheets is the **single source of truth**, so restarts never lose data.
 
@@ -347,12 +346,12 @@ Run Bot uses **long-polling**, so it runs as a **worker** (no HTTP port).
   points — but **only** on the morning after a coach-created round has ended
   (see [Pairs leaderboard](#pairs-leaderboard) below). A round finishing Sunday
   is reported Monday 09:00. With no active round, nothing is posted at all.
-- **Weekly individual (Mon 09:05):** first awards **streak bonuses** for the
-  previous week (so they show up in the board), then posts individual totals for
-  the **previous** Monday–Sunday week.
+- **Weekly individual (Mon 09:05):** posts individual totals for the
+  **previous** Monday–Sunday week.
 - **Monthly (1st 09:00):** posts totals for the **previous** full calendar month.
 - Rankings sum each user's points over the range (**including** the
-  walking/cycling/strength bonus points and `streak_bonus` points), sorted
+  walking/cycling/strength bonus points; legacy `streak_bonus` rows are
+  **excluded**), sorted
   high→low, with 🥇🥈🥉 medals for the top three (ranks 4+ have
   no medal). Users are labelled by full name, else `@username`, else
   `user <id>`. All participants with points are listed.
@@ -474,7 +473,7 @@ rounds are kept for history, never deleted.
 - **Scoring reuses the individual board's aggregation** — the same round window,
   the same `SEASON_START_DATE` cutoff, and the same **already-stored** point
   values. There are **no pair multipliers**: running still yields more than the
-  flat 5 for walking/cycling/strength, and `streak_bonus` rows count as normal
+  flat 5 for walking/cycling/strength; legacy `streak_bonus` rows are skipped
   points. A pair's total is simply the **sum of both members'** points; a member
   with no workouts in the round contributes **0** (the pair is never skipped).
 - **Members render in the configured order**, `Member A ; Member B`, using the
@@ -518,16 +517,9 @@ workouts/week they aim for — and points scale to that plan.
 
 - **Overachievement:** workouts logged **beyond** your plan in the same week
   still count, at **50%** of the base rate (also an exact fraction).
-- **Streak bonus:** every Monday the bot checks the previous week. If you
-  **completed your plan**, your streak increments; otherwise it resets to 0.
-  Consecutive completed weeks award a bonus (added to that week's leaderboard):
-
-  | Consecutive weeks | 1 | 2 | 3 | 4 | 5 | 6 | 7+ |
-  |-------------------|---|---|---|---|---|---|----|
-  | Bonus points | 0 | 0 | +5 | +10 | +15 | +20 | +20 |
-
-  Streak bonuses are logged as `streak_bonus` rows in the sheet and **count
-  toward the leaderboards**. Changing your plan applies **going forward only** —
+- **No streak bonus.** The weekly streak bonus was removed. Old `streak_bonus`
+  rows stay in the sheet as history but **no longer count** toward any
+  leaderboard. Changing your plan applies **going forward only** —
   already-logged runs keep their points.
 
 ### Other activities — walking, cycling & strength
@@ -535,7 +527,7 @@ workouts/week they aim for — and points scale to that plan.
 Besides running, three **bonus** activities each earn a flat **5 points** once a
 minimum duration is met. They count in the weekly/monthly leaderboards but are
 **separate** from the running plan — they do **not** affect your plan progress,
-streak, or overachievement (those stay running-only).
+or overachievement (those stay running-only).
 
 | Activity | Minimum duration | Points | Success reply | Below-minimum reply |
 |----------|:----------------:|:------:|---------------|---------------------|
@@ -608,8 +600,8 @@ leak secrets — only a concise result is sent to chat.
 
 **Plan commands:**
 
-- **`/myplan`** — replies with your current plan and streak (defaults to plan 3,
-  streak 0 if a coach hasn't set one for you).
+- **`/myplan`** — replies with your current plan (defaults to plan 3 if a coach
+  hasn't set one for you).
 
 **Coach commands (setting up workouts — COACHES ONLY):**
 
@@ -622,10 +614,10 @@ for you.` and does nothing. Coaches can set or view **other** members' plans.
   parsed from the last integer, so `/setplan @jane 4` works.
 - **`/setplan N`** as a **reply** to a member's message *(coach)* — sets the
   replied-to member's plan.
-- **`/myplan @username`** *(coach)* — view another member's plan + streak.
+- **`/myplan @username`** *(coach)* — view another member's plan.
 - **`/myplan`** as a **reply** to a member's message *(coach)* — view the
-  replied-to member's plan + streak. For a member with no plan yet, defaults
-  (plan 3 / streak 0) are shown with a `(no plan set yet, using default 3)` note.
+  replied-to member's plan. For a member with no plan yet, the default
+  (plan 3) is shown with a `(no plan set yet, using default 3)` note.
 
 **Finding user IDs & the username directory:**
 

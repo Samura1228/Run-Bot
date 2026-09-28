@@ -364,7 +364,7 @@ async def setplan_command(
     ``4`` both work) and validated to ``[MIN_PLAN, MAX_PLAN]`` (2–6). Only a
     configured coach may set plans: regular users can no longer set up their
     own workouts (self-service is disabled) and are told to ask their coach.
-    On success the target's Plans row is upserted (preserving streak).
+    On success the target's Plans row is upserted.
     """
 
     message = update.effective_message
@@ -455,14 +455,14 @@ async def setplan_command(
 async def myplan_command(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    """Reply with a plan and streak via ``/myplan``.
+    """Reply with a plan via ``/myplan``.
 
     Forms:
-      - ``/myplan`` → the caller's own plan + streak (self-service).
-      - ``/myplan @username`` (coach) → that user's plan + streak.
-      - reply to a user's message + ``/myplan`` (coach) → their plan + streak.
+      - ``/myplan`` → the caller's own plan (self-service).
+      - ``/myplan @username`` (coach) → that user's plan.
+      - reply to a user's message + ``/myplan`` (coach) → their plan.
 
-    Defaults to plan :data:`DEFAULT_PLAN` (3) / streak 0 if the target has no
+    Defaults to plan :data:`DEFAULT_PLAN` (3) if the target has no
     Plans row. Viewing another user requires the caller to be a coach.
     """
 
@@ -499,19 +499,18 @@ async def myplan_command(
         return
 
     plan = record["plan"] if record is not None else DEFAULT_PLAN
-    streak = record["streak"] if record is not None else 0
 
     if target_id == caller.id:
         await _safe_reply(
             message,
-            f"Your plan: {plan} workouts/week · streak: {streak} weeks.",
+            f"Your plan: {plan} workouts/week.",
         )
     else:
         who = _who_label(target_id, target_username, target_display)
         note = "" if record is not None else " (no plan set yet, using default 3)"
         await _safe_reply(
             message,
-            f"{who} — plan: {plan} workouts/week · streak: {streak} weeks.{note}",
+            f"{who} — plan: {plan} workouts/week.{note}",
         )
 
 async def _resolve_pair_member(

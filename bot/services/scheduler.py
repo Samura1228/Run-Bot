@@ -19,7 +19,6 @@ from apscheduler.triggers.cron import CronTrigger
 from telegram import Bot
 from telegram.error import TelegramError
 
-from bot.models import WorkoutLogRow
 from bot.services.leaderboard import LeaderboardService
 from bot.services.sheets import PAIRS_STATUS_POSTED, SheetsService
 from bot.utils.dates import (
@@ -27,156 +26,8 @@ from bot.utils.dates import (
     previous_week_bounds,
     today_in,
 )
-from bot.utils.points import DEFAULT_PLAN, streak_bonus
 
 logger = logging.getLogger(__name__)
-
-
-async def evaluate_weekly_streaks(
-    sheets: SheetsService,
-    tz: str,
-) -> None:
-    """Evaluate streaks for the previous Mon–Sun week and award streak bonuses.
-
-    For each user with a plan row (plus any user who logged running workouts in
-    the previous week but has no plan row → treated as :data:`DEFAULT_PLAN`):
-
-    1. Count their completed running workouts in the previous week.
-    2. If ``completed >= plan`` → increment their streak, else reset to 0.
-    3. Persist the new streak (upsert, preserving plan/username).
-    4. If the new streak's bonus is > 0, append a ``streak_bonus`` row to the
-       ``Log`` worksheet dated to the previous week's Sunday, so it falls within
-       that week and is picked up by the leaderboard aggregation.
-
-    Idempotent-ish: before awarding, it checks the Log for an existing
-    ``streak_bonus`` row for that user dated to the same previous-week Sunday and
-    skips if present, avoiding double-counting on scheduler misfire/coalesce.
-    """
-
-    prev_start, prev_end = previous_week_bounds(tz)
-
-    try:
-        plan_rows = await sheets.list_plans()
-    except Exception as exc:
-        logger.error("Streak rollover: failed to list plans: %s", exc)
-        plan_rows = []
-
-    # Build a user_id -> {plan, streak, username} map from plan rows.
-    users: dict[int, dict] = {}
-    for row in plan_rows:
-        users[row["user_id"]] = {
-            "plan": row["plan"],
-            "streak": row["streak"],
-            "username": row["username"],
-        }
-
-    # Also include any user who logged running workouts in the previous week but
-    # has no plan row (treated as DEFAULT_PLAN, streak 0).
-    try:
-        prev_rows = await sheets.read_rows_in_range(prev_start, prev_end)
-    except Exception as exc:
-        logger.error("Streak rollover: failed to read previous week rows: %s", exc)
-        prev_rows = []
-    for row in prev_rows:
-        uid = row["telegram_user_id"]
-        if uid not in users:
-            users[uid] = {
-                "plan": DEFAULT_PLAN,
-                "streak": 0,
-                "username": row.get("telegram_username", ""),
-            }
-        elif not users[uid]["username"]:
-            # Backfill username from the log if the plan row lacked one.
-            users[uid]["username"] = row.get("telegram_username", "")
-
-    for uid, info in users.items():
-        # Coaches never score, so they never earn (or lose) a streak either.
-        # Their rows are already invisible to read_rows_in_range, but a coach
-        # can still have a Plans row — skip it rather than churn its streak.
-        if sheets.is_excluded_user(uid):
-            continue
-        plan = info["plan"]
-        old_streak = info["streak"]
-        username = info["username"]
-
-        try:
-            completed = await sheets.count_user_workouts_in_week(
-                uid, prev_start, prev_end
-            )
-        except Exception as exc:
-            logger.error(
-                "Streak rollover: failed to count workouts for user %s: %s",
-                uid,
-                exc,
-            )
-            continue
-
-        new_streak = old_streak + 1 if completed >= plan else 0
-
-        try:
-            await sheets.set_streak(uid, new_streak, username=username, plan=plan)
-        except Exception as exc:
-            logger.error(
-                "Streak rollover: failed to persist streak for user %s: %s",
-                uid,
-                exc,
-            )
-            # Continue; still attempt bonus below only if streak persisted? We
-            # persisted-or-failed; skip bonus on failure to avoid inconsistency.
-            continue
-
-        bonus = streak_bonus(new_streak) if new_streak >= 1 else 0
-
-        logger.info(
-            "Streak: user=%s completed=%s/%s streak=%s bonus=%s",
-            uid,
-            completed,
-            plan,
-            new_streak,
-            bonus,
-        )
-
-        if bonus <= 0:
-            continue
-
-        # Idempotency guard: skip if a streak_bonus row already exists for this
-        # user dated to the previous week's Sunday.
-        try:
-            already = await sheets.has_streak_bonus_for_date(uid, prev_end)
-        except Exception as exc:
-            logger.error(
-                "Streak rollover: dedup check failed for user %s: %s", uid, exc
-            )
-            already = False
-        if already:
-            logger.info(
-                "Streak: bonus already recorded for user=%s date=%s; skipping.",
-                uid,
-                prev_end,
-            )
-            continue
-
-        bonus_row = WorkoutLogRow(
-            timestamp=WorkoutLogRow.now_timestamp(),
-            telegram_user_id=uid,
-            telegram_username=username,
-            display_name="",
-            workout_date=prev_end.isoformat(),
-            activity_type="streak_bonus",
-            points=bonus,
-            image_hash="-",
-            telegram_file_id="-",
-            chat_id=0,
-            message_id=0,
-        )
-        try:
-            await sheets.append_workout(bonus_row)
-        except Exception as exc:
-            logger.error(
-                "Streak rollover: failed to append bonus row for user %s: %s",
-                uid,
-                exc,
-            )
 
 
 async def run_weekly_leaderboard(
@@ -186,17 +37,11 @@ async def run_weekly_leaderboard(
     target_chat_id: int,
     tz: str,
 ) -> None:
-    """Award streak bonuses, then post the previous week's leaderboard.
+    """Post the previous week's leaderboard.
 
-    Streak bonuses are evaluated/recorded BEFORE the leaderboard is aggregated
+    Aggregated
     so this week's board reflects them.
     """
-
-    # Record streak bonuses first so they're included in the aggregation below.
-    try:
-        await evaluate_weekly_streaks(sheets, tz)
-    except Exception as exc:
-        logger.error("Streak rollover raised; continuing to leaderboard: %s", exc)
 
     start_date, end_date = previous_week_bounds(tz)
     try:
@@ -258,15 +103,6 @@ async def run_pairs_round_board(
         return
 
     start_date = current["start_date"]
-
-    # Record streak bonuses first so they're included in the aggregation below
-    # (idempotent — a no-op if the weekly 09:05 job already recorded them).
-    try:
-        await evaluate_weekly_streaks(sheets, tz)
-    except Exception as exc:
-        logger.error(
-            "Streak rollover raised; continuing to pairs board: %s", exc
-        )
 
     try:
         entries = await leaderboard.aggregate_pairs(
@@ -342,8 +178,7 @@ def build_scheduler(
     Args:
         bot: PTB bot instance used by jobs to send messages.
         leaderboard: Service for aggregating & formatting leaderboards.
-        sheets: Sheets service used by the weekly job for the streak rollover
-            and by the pairs job to read the current round.
+        sheets: Sheets service used by the pairs job to read the current round.
         target_chat_id: Chat to post leaderboards to. If ``None``, the
             leaderboard jobs are not registered (see warning below).
         tz: IANA timezone name (e.g. ``Europe/Nicosia``).

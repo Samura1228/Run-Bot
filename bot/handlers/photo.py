@@ -420,7 +420,7 @@ class PhotoHandler:
         if activity == "running":
             # RUNNING (unchanged): plan-based fractional points. Count how many
             # running workouts the user has ALREADY logged in the week THIS
-            # workout's date belongs to (excluding this one, streak_bonus rows,
+            # workout's date belongs to (excluding this one, legacy streak rows,
             # and other users), then compute the plan-based per-workout value.
             # Using the workout's own week keeps a late submission scored against
             # the week it was actually performed in.
@@ -454,7 +454,7 @@ class PhotoHandler:
         else:
             # BONUS ACTIVITY (walking/cycling/strength): flat points once the
             # per-activity minimum duration is met. These are SEPARATE bonus
-            # points — they do NOT touch the plan/streak/overachievement.
+            # points — they do NOT touch the plan or overachievement.
             dur = verdict.duration_minutes
             if dur is None:
                 # Duration couldn't be read → can't score. No log, no points.
@@ -499,7 +499,7 @@ class PhotoHandler:
 
         # Opportunistically keep the username directory fresh so coach commands
         # can resolve @username → id for people who post. Best-effort only: it
-        # upserts ONLY identity columns (never the plan/streak) and MUST NOT
+        # upserts ONLY identity columns (never the plan) and MUST NOT
         # block or fail the workout logging below.
         try:
             await self._sheets.touch_user(user.id, username, display_name)
@@ -554,7 +554,7 @@ class PhotoHandler:
 
         # Weekly running total appended to the confirmation: the user's points
         # for the week THIS workout belongs to (running + bonus activities +
-        # any streak bonus), read back AFTER the row was written so it already
+        # activities), read back AFTER the row was written so it already
         # includes the points just awarded, and matching what the weekly
         # leaderboard will show. Best-effort: if the read fails, the base
         # confirmation still goes out without the total.

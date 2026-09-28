@@ -89,7 +89,7 @@ class LeaderboardService:
 
         Reuses :meth:`aggregate` verbatim (same ``read_rows_in_range`` data
         path, same season cutoff, same stored point values — no extra
-        multipliers, and ``streak_bonus`` rows count as normal points), then
+        multipliers; legacy ``streak_bonus`` rows are excluded), then
         simply sums the two configured members' totals. A member with no rows in
         the range contributes ``0`` and never skips the pair.
 

@@ -112,7 +112,7 @@ run-bot/
 | [`bot/services/leaderboard.py`](bot/services/leaderboard.py) | Aggregate points per user for a date range; format weekly/monthly messages. |
 | [`bot/utils/dates.py`](bot/utils/dates.py) | Compute current/previous Mon–Sun week and previous calendar month in Europe/Nicosia, plus the accepted-submission window (`accepted_workout_window()`) and the week containing a given date (`week_bounds_containing()`). |
 | [`bot/utils/hashing.py`](bot/utils/hashing.py) | Deterministic image byte hashing for dedup. |
-| [`bot/utils/points.py`](bot/utils/points.py) | Plan-based points model: constants, `workout_points()` (base + overachievement) and `streak_bonus()`; the `ACTIVITY_POINTS` mapping now only gates awardable activity types (running). |
+| [`bot/utils/points.py`](bot/utils/points.py) | Plan-based points model: constants, `workout_points()` (base + overachievement); the `ACTIVITY_POINTS` mapping now only gates awardable activity types (running). |
 
 ---
 
@@ -150,14 +150,14 @@ timestamp | telegram_user_id | telegram_username | display_name | workout_date |
 2026-07-01T18:37:53Z | 123456789 | jrunner | Jane Runner | 2026-06-30 | running | 10 | 9f2c1a...e4 | AgACAgQAAx... | -1001234567890 | 4521
 ```
 
-**Example `streak_bonus` row** (written by the Monday rollover; dated to the previous week's Sunday, with placeholder hash/file id):
+**Legacy `streak_bonus` row** (written by the removed Monday rollover; still present in older sheets and **ignored** by every aggregation read):
 ```
 2026-07-06T06:00:03Z | 123456789 | jrunner |  | 2026-07-05 | streak_bonus | 5 | - | - | 0 | 0
 ```
 
 > **Note on storage types:** Google Sheets stores everything as cells; the "type" column indicates the logical type. IDs are written as **plain text** (leading apostrophe or explicitly value-input as string) to avoid precision loss on large integers.
 
-### Worksheet: `Plans` (per-user weekly plans & streaks)
+### Worksheet: `Plans` (per-user weekly plans)
 
 Auto-created (with its header row) on first run alongside the `Log` worksheet. One row per user; IDs stored as plain text (RAW).
 
@@ -166,10 +166,10 @@ Auto-created (with its header row) on first run alongside the `Log` worksheet. O
 | A | `telegram_user_id` | integer (stored as string) | The user's Telegram id (upsert key). |
 | B | `telegram_username` | string | `@username` without `@`, or empty. |
 | C | `plan` | integer | Workouts/week target, clamped to `[2, 6]`. Blank/invalid → default `3`. |
-| D | `streak` | integer | Consecutive completed weeks. Blank/invalid → `0`. |
+| D | `streak` | integer | **Legacy**, unused since the streak bonus was removed. Preserved on upsert so the column layout stays valid; nothing reads it. |
 | E | `updated_at` | string (ISO 8601) | UTC time the row was last written. |
 
-**Upsert key:** `telegram_user_id`. `/setplan` updates the row if present (preserving `streak`), else appends a new one. The Monday rollover updates `streak` (preserving `plan`/`username`).
+**Upsert key:** `telegram_user_id`. `/setplan` updates the row if present (preserving the legacy `streak` cell), else appends a new one. The Monday rollover updates `streak` (preserving `plan`/`username`).
 
 **Username directory:** the `Plans` worksheet doubles as an `@username → id` directory. Because Telegram does **not** expose a numeric id from plain `@username` text, the bot learns ids opportunistically: `SheetsService.touch_user(user_id, username, display_name)` upserts **only** the identity columns (creating a row with `DEFAULT_PLAN`/streak 0 if absent, otherwise updating just the username + `updated_at` when it changed — never touching an existing `plan`/`streak`). It is called best-effort for the poster in the photo handler (wrapped so a failure never blocks/undoes workout logging) and from `/setplan`/`/myplan`/`/whoami`. `SheetsService.find_user_id_by_username(username)` scans this sheet case-insensitively (ignoring a leading `@`) and returns the **most recent** matching id, or `None`. This backs coach commands that target `@username` for anyone the bot has already seen.
 
@@ -409,7 +409,6 @@ The date check therefore uses an **accepted window** rather than the bare curren
 
 - **Aggregation:** `read_rows_in_range(prev_start, prev_end)` for the previous Mon–Sun window includes the row, so it counts on the 09:00/09:05 boards for the week it belongs to.
 - **Running weekly count:** the handler derives the scoring week with `week_bounds_containing(wdate)` — the week the workout's **own date** falls in — and passes it to `count_user_workouts_in_week()`. A late run is therefore counted against the **previous** week, keeping the plan-based `30/plan` rate and the `OVERACHIEVEMENT_RATE` halving correct rather than mis-scoring it as the new week's first workout.
-- **Streak rollover:** unchanged — it reads the same previous-week window, so a late row also feeds the streak evaluation when the rollover runs.
 
 The `SEASON_START_DATE` cutoff and duplicate-image detection stay **fully in force** for late submissions.
 
@@ -436,7 +435,6 @@ Constants live in [`bot/utils/points.py`](bot/utils/points.py):
 | `MIN_PLAN` / `MAX_PLAN` | 2 / 6 | Allowed plan range. |
 | `DEFAULT_PLAN` | 3 | Plan used when a user has no `Plans` row. |
 | `OVERACHIEVEMENT_RATE` | 0.5 | Multiplier for workouts logged **beyond** the plan. |
-| `STREAK_BONUS_PER_WEEK` | `[0,0,0,5,10,15,20]` | Bonus by consecutive completed weeks (capped at last index). |
 
 **Per-workout points** (`workout_points(plan, workouts_this_week_so_far)`):
 
@@ -468,7 +466,7 @@ return round(pts, 2)                     # EXACT fraction (2-dp), NOT rounded to
 Three **bonus** activity types award a flat **5 points** each, independently of
 the running plan. They go through the **same** gating pipeline as running
 (Garmin + completed + valid current-week date + confidence ≥ `MIN_CONFIDENCE` +
-dedup), but the points are fixed and **do not** affect the plan/streak/
+dedup), but the points are fixed and **do not** affect the plan/
 overachievement (the per-user weekly running **count** used for those still
 counts `activity_type == "running"` rows only).
 
@@ -620,16 +618,12 @@ function decide_and_process(message, verdict, image_hash):
 
 **Write-first, then reply:** on success the row is written to the Sheet and an INFO log line `Logged workout: user=... date=... points=<computed>` is emitted; **only after** the confirmed write does the bot reply in chat with `✅ Nice run, {name}! +{points} points. //total week = {total} points`, where the total is that user's points for the week the workout belongs to (running + bonus activities + any streak bonus), re-read from the Sheet after the write so it already includes the points just awarded. If that read fails the confirmation is still sent, just without the total. A failed reply is logged but never undoes the saved row. Rejected supported tracker screenshots get an explanatory reply, while non-tracker photos, unreadable/low-confidence images and duplicates stay silent (see [Reply policy](#reply-policy-silent-on-non-tracker-photos-explain-real-rejections)). (Weekly/monthly leaderboards are still posted to the group.)
 
-### Streak Bonus (weekly rollover)
+### Streak Bonus — REMOVED
 
-At the Monday 09:00 weekly job — **before** the leaderboard is aggregated/posted so it's reflected in that week's board — the bot evaluates the **previous** Mon–Sun week:
+The weekly streak bonus (a rollover that incremented a per-user streak and appended `streak_bonus` rows to `Log`) has been **removed**. There is no rollover, no `streak_bonus` row is ever written again, and `SheetsService` no longer exposes `set_streak` / `get_streak` / `has_streak_bonus_for_date`.
 
-1. For each user in `Plans` (plus any user who logged running workouts last week but has no plan row → treated as `DEFAULT_PLAN`), count their completed running workouts.
-2. If `completed >= plan` → `streak += 1`; else `streak = 0`. The new streak is persisted to `Plans`.
-3. If `streak >= 1` and `STREAK_BONUS_PER_WEEK[min(streak, len-1)] > 0`, a `streak_bonus` row is appended to `Log` with `points = bonus`, `workout_date` = the previous week's **Sunday** (so it counts in that week), and placeholder hash/file id (`-`).
-4. **Idempotency:** before awarding, the bot checks `Log` for an existing `streak_bonus` row for that user dated to the same previous-week Sunday and skips if found, preventing double-awarding on scheduler misfire/coalesce.
+Historical `streak_bonus` rows are **left in the sheet** as a record but are **skipped by every aggregation read** (`LEGACY_STREAK_BONUS_ACTIVITY` in [`bot/services/sheets.py`](bot/services/sheets.py)), so they award nothing on any board — the same read-time-exclusion approach used for the season cutoff and for coaches. The `streak` column survives in the `Plans` header purely to keep the existing sheet's column layout valid; nothing reads it.
 
-Each evaluation logs `Streak: user=<id> completed=<n>/<plan> streak=<new> bonus=<b>`. Because the leaderboard sums **all** `Log` rows in range regardless of `activity_type`, `streak_bonus` points are automatically included in the totals — while the per-user workout **count** used for streak/overachievement still counts **running** rows only (the two concerns are kept separate).
 ---
 
 ## 6. Scheduling Design
@@ -645,11 +639,9 @@ Each evaluation logs `Streak: user=<id> completed=<n>/<plan> streak=<new> bonus=
 
 | Job | Trigger | Fires | Action |
 |-----|---------|-------|--------|
-| Weekly **pairs** leaderboard | `CronTrigger(day_of_week="mon", hour=9, minute=0, timezone=tz)` | Monday 09:00 | Run the **streak rollover**, then post ranked **combined** totals per configured pair for the **previous** Mon–Sun week. Not registered when `PAIRS` is empty. |
-| Weekly individual leaderboard | `CronTrigger(day_of_week="mon", hour=9, minute=5, timezone=tz)` | Monday 09:05 | Run the **streak rollover** (award `streak_bonus` rows), then post ranked individual totals for the **previous** Mon–Sun week. |
+| Weekly **pairs** leaderboard | `CronTrigger(day_of_week="mon", hour=9, minute=0, timezone=tz)` | Monday 09:00 | Post ranked **combined** totals per configured pair for the **previous** Mon–Sun week. Not registered when `PAIRS` is empty. |
+| Weekly individual leaderboard | `CronTrigger(day_of_week="mon", hour=9, minute=5, timezone=tz)` | Monday 09:05 | Post ranked individual totals for the **previous** Mon–Sun week. |
 | Monthly leaderboard | `CronTrigger(day=1, hour=9, minute=0, timezone=tz)` | 1st of month 09:00 | Post ranked totals for the **previous** full calendar month. |
-
-**Streak-rollover ordering.** The rollover is **not** a standalone cron job — it runs inline at the START of each weekly job (`evaluate_weekly_streaks()`), writing `streak_bonus` rows dated the **previous Sunday**, i.e. inside the week being reported. Because the pairs job now fires at 09:00 — five minutes *before* the individual job at 09:05 — the pairs job performs the rollover itself before aggregating. The rollover is **idempotent** (`SheetsService.has_streak_bonus_for_date()` skips a user who already has a bonus row for that Sunday), so whichever job runs first records the bonuses and the other simply skips them. Both boards therefore always include that week's streak bonuses, in either order.
 
 **Failure isolation.** The two weekly jobs are registered **independently** and each swallows/logs its own exceptions, so a failure in the pairs board can never prevent the individual board from posting, and vice versa.
 
@@ -692,7 +684,7 @@ def build_scheduler(bot, sheets, leaderboard, target_chat_id, tz, pairs):
 
 1. Read all rows from worksheet `Log` (via `SheetsService.read_rows_in_range()`), skipping the header.
 2. Filter rows where `workout_date` (column E) falls in `[range_start, range_end]` (inclusive dates) **and** is on or after `SEASON_START_DATE` (pre-season rows are excluded so the leaderboard reflects only the current season — see Section 5).
-3. Group by `telegram_user_id`; sum `points` for **all** rows in range **regardless of `activity_type`** (so `running` workout points, the `walking`/`cycling`/`strength` 5-point bonuses, **and** `streak_bonus` points all count); keep the most recent `display_name`/`telegram_username` for that user id.
+3. Group by `telegram_user_id`; sum `points` for **all** rows in range (so `running` workout points and the `walking`/`cycling`/`strength` 5-point bonuses count; legacy `streak_bonus` rows are **excluded**); keep the most recent `display_name`/`telegram_username` for that user id.
 4. Sort descending by total points; tie-break by `display_name` alphabetically.
 
 ```
@@ -802,8 +794,8 @@ An empty `PAIRS` yields no entries and the job is not registered at all (nothing
 | Command | Description |
 |---------|-------------|
 | `/setplan @user N`<br>*(aliases: `/setmyplan`, `/setuserplan`, `/setplans`)* | **Coach-only** (caller in `COACH_IDS`). Set a member's weekly plan (`N` in **2–6**) by `@username` (resolved via the `Plans` username directory or a `text_mention` entity) or by **replying** to their message + `/setplan N`. The plan is parsed from the **last** integer token so both `@user 4` and (reply) `4` work; validated to 2–6. Upserts the target's `Plans` row (preserving streak) and replies naming who was set. **Regular users cannot set up their own workouts:** any non-coach caller is rejected early with `Only your coach can set up workouts for you.` An unresolvable `@username` gets `Couldn't find @user. Ask them to post once (or use /whoami by replying to their message) so I can learn their ID.` |
-| `/myplan` | Reply with the caller's own plan + streak (defaults to plan 3 / streak 0 if unset). |
-| `/myplan @user` | **Coach-only.** View another member's plan + streak by `@username` or by **replying** to their message. Shows defaults (plan 3 / streak 0) with a `(no plan set yet, using default 3)` note if they have no row. Same permission/not-found messages as coach `/setplan`. |
+| `/myplan` | Reply with the caller's own plan (defaults to plan 3 if unset). |
+| `/myplan @user` | **Coach-only.** View another member's plan by `@username` or by **replying** to their message. Shows defaults (plan 3 / streak 0) with a `(no plan set yet, using default 3)` note if they have no row. Same permission/not-found messages as coach `/setplan`. |
 | `/whoami` | Reply with the caller's Telegram id + name (id in `<code>` monospace for easy copy). Used as a **reply** to another user's message, reports THAT user's id + name instead — the primary way coaches discover member IDs (for `COACH_IDS` and username resolution). |
 | `/pairs` | **Coach-only** (same `Settings.is_coach()` check as `/setplan`; non-coaches get `Only a coach can view the pairs leaderboard.`). Replies with the **current** week's pairs board via `current_week_bounds()`, reusing `aggregate_pairs()` + `format_pairs()` — the same code the Monday 09:00 job uses. The optional argument **`last`** (aliases `prev`/`previous`, case-insensitive) switches to `previous_week_bounds()` — the exact window the scheduled Monday 09:00 board reports — and appends the window (e.g. `(2026-08-03 – 2026-08-09)`) so a re-posted previous-week board can't be mistaken for the current one; any other argument falls back to the current week. Useful after a late submission is accepted under the grace period (Section 5), since such a row keeps its real `workout_date` and belongs to the previous week. Replies `No pairs configured (the PAIRS setting is empty).` when `PAIRS` is empty. Registered in [`bot/main.py`](bot/main.py) but intentionally **omitted from `setMyCommands`** (unadvertised, like `/setplan`). |
 | `/status` | Consolidated health report (Telegram, Anthropic, Google Sheets, target chat, timezone). |

@@ -8,8 +8,6 @@ Implements the plan-based points model:
   workout up to the plan awards ``STANDARD_POINTS_PER_WEEK / plan`` points.
 - Workouts logged **beyond** the plan (overachievement) award the base rate
   times :data:`OVERACHIEVEMENT_RATE` (50%).
-- A weekly rollover awards a **streak bonus** for consecutive completed weeks
-  per :data:`STREAK_BONUS_PER_WEEK`.
 
 ``ACTIVITY_POINTS`` / :func:`resolve_points` are retained only so the photo
 handler can gate which activity types are awardable at all (running only); the
@@ -25,13 +23,11 @@ MIN_PLAN = 2
 MAX_PLAN = 6
 DEFAULT_PLAN = 3
 OVERACHIEVEMENT_RATE = 0.5
-# index = consecutive completed weeks (capped at the last index).
-STREAK_BONUS_PER_WEEK = [0, 0, 0, 5, 10, 15, 20]
 
 # --- Bonus (non-running) activity model ----------------------------------- #
 # Walking / cycling / strength are SEPARATE bonus points: they award a flat
 # value once a minimum duration is met, and DO NOT count toward the running
-# plan, streak, or overachievement (those remain running-only).
+# plan or overachievement (those remain running-only).
 BONUS_ACTIVITY_POINTS = 5
 # Minimum duration (in minutes) required to earn the flat bonus per activity.
 ACTIVITY_MIN_MINUTES = {"walking": 40, "cycling": 60, "strength": 15}
@@ -120,16 +116,3 @@ def format_points(p: float) -> str:
     text = f"{float(p):.2f}".rstrip("0").rstrip(".")
     # Guard against "-0" for negative-zero inputs.
     return text if text not in ("", "-0") else "0"
-
-
-def streak_bonus(streak: int) -> int:
-    """Return the streak bonus for a given consecutive-completed-week count.
-
-    ``streak`` is capped at the last index of :data:`STREAK_BONUS_PER_WEEK`. A
-    ``streak`` of 0 (or negative) yields 0.
-    """
-
-    if streak <= 0:
-        return 0
-    idx = min(streak, len(STREAK_BONUS_PER_WEEK) - 1)
-    return STREAK_BONUS_PER_WEEK[idx]

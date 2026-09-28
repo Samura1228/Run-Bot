@@ -60,7 +60,7 @@ def build_application(settings: Settings) -> Application:
         sheet_id=settings.google_sheet_id,
         season_start_date=settings.season_start_date,
         # Coaches never score: their rows are dropped from every board, pair
-        # and streak evaluation (and the photo handler ignores their posts).
+        # (and the photo handler ignores their posts entirely).
         excluded_user_ids=settings.coach_ids,
     )
     vision = ClaudeVisionService(
@@ -141,7 +141,7 @@ def build_application(settings: Settings) -> Application:
         # set up their own workouts or pairs). Their handlers are still
         # registered so coaches can use them.
         commands = [
-            BotCommand("myplan", "Show your plan and streak"),
+            BotCommand("myplan", "Show your weekly plan"),
             BotCommand("whoami", "Show your Telegram ID (or reply to someone)"),
             BotCommand("status", "Check bot health (Telegram/AI/Sheets)"),
             BotCommand("testsheet", "Test the Google Sheet connection"),

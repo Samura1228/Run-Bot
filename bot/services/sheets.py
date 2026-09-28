@@ -83,7 +83,16 @@ _COL_ACTIVITY_TYPE = 5
 _COL_POINTS = 6
 _COL_IMAGE_HASH = 7
 
+# Activity type of the rows written by the old weekly streak-bonus rollover.
+# The feature is gone; these rows are kept in the sheet as history but are
+# skipped by every aggregation read, so they award nothing.
+LEGACY_STREAK_BONUS_ACTIVITY = "streak_bonus"
+
 # --- Plans worksheet ------------------------------------------------------ #
+# NOTE: the ``streak`` column is a LEFTOVER of the removed streak-bonus
+# feature. It is kept in the header (and preserved on every upsert) purely so
+# the existing sheet's column layout stays valid — nothing reads it to award
+# anything any more.
 PLANS_HEADER_ROW = [
     "telegram_user_id",
     "telegram_username",
@@ -149,8 +158,8 @@ class SheetsService:
         self._season_start_date = season_start_date
         # Non-scoring members (the coaches): their rows are ignored by the SAME
         # aggregation reads the season cutoff guards, so they never appear on a
-        # leaderboard, never count toward a pair, and never earn a streak bonus
-        # — WITHOUT deleting anything. Kept as strings because the sheet cells
+        # leaderboard and never count toward a pair — WITHOUT deleting
+        # anything. Kept as strings because the sheet cells
         # are strings and every read compares ``row[_COL_USER_ID]`` directly.
         self._excluded_user_ids = {str(uid) for uid in (excluded_user_ids or ())}
         self._client: Optional[gspread.Client] = None
@@ -338,6 +347,11 @@ class SheetsService:
             # Coaches never score: drop their rows from every board and pair.
             if self._is_excluded(row[_COL_USER_ID]):
                 continue
+            # Streak bonuses were removed from the bot. Legacy ``streak_bonus``
+            # rows stay in the sheet for the record but no longer count, so the
+            # boards show only points actually earned by training.
+            if row[_COL_ACTIVITY_TYPE] == LEGACY_STREAK_BONUS_ACTIVITY:
+                continue
             if not in_range(wdate, start_date, end_date):
                 continue
             try:
@@ -362,8 +376,8 @@ class SheetsService:
         """Count a user's running workouts logged within a Mon–Sun week.
 
         Only rows with ``activity_type == "running"`` are counted; special rows
-        such as ``streak_bonus`` and rows for other users are excluded. Used by
-        the per-workout points calculation and the weekly streak rollover.
+        such as legacy ``streak_bonus`` rows and rows for other users are
+        excluded. Used by the per-workout points calculation.
         """
 
         if self.is_excluded_user(user_id):
@@ -384,7 +398,7 @@ class SheetsService:
             except (ValueError, IndexError):
                 continue
             # Season cutoff: pre-season workouts do not count toward the
-            # per-workout points calculation or the weekly streak rollover.
+            # per-workout points calculation.
             if self._before_season(wdate):
                 continue
             if in_range(wdate, week_start, week_end):
@@ -398,8 +412,8 @@ class SheetsService:
 
         Unlike :meth:`count_user_workouts_in_week` (running rows only, used for
         the plan-based per-workout rate) this sums EVERY row the user has in the
-        range — running, the flat bonus activities and ``streak_bonus`` — so the
-        value matches what the weekly leaderboard shows for that user. Used for
+        range — running and the flat bonus activities — so the value matches
+        what the weekly leaderboard shows for that user. Used for
         the "total week" figure appended to the success reply after a submission
         has been written.
 
@@ -424,6 +438,9 @@ class SheetsService:
                 continue
             if self._before_season(wdate):
                 continue
+            # Legacy streak bonuses no longer count (see read_rows_in_range).
+            if row[_COL_ACTIVITY_TYPE] == LEGACY_STREAK_BONUS_ACTIVITY:
+                continue
             if not in_range(wdate, start_date, end_date):
                 continue
             try:
@@ -431,30 +448,6 @@ class SheetsService:
             except (ValueError, IndexError):
                 continue
         return round(total, 2)
-
-    async def has_streak_bonus_for_date(
-        self, user_id: int, bonus_date: date
-    ) -> bool:
-        """Return True if a ``streak_bonus`` row already exists for the user/date.
-
-        Used by the weekly rollover to avoid double-awarding a streak bonus if
-        the scheduler misfires/coalesces and re-runs the same Monday.
-        """
-
-        rows = await asyncio.to_thread(self._read_all_records_sync)
-        user_id_str = str(user_id)
-        bonus_date_str = bonus_date.isoformat()
-
-        for row in rows[1:]:  # skip header
-            if len(row) <= _COL_POINTS:
-                continue
-            if row[_COL_USER_ID] != user_id_str:
-                continue
-            if row[_COL_ACTIVITY_TYPE] != "streak_bonus":
-                continue
-            if row[_COL_WORKOUT_DATE] == bonus_date_str:
-                return True
-        return False
 
     # ------------------------------------------------------------------ #
     # Plans worksheet reads/writes
@@ -535,14 +528,6 @@ class SheetsService:
         if record is None:
             return DEFAULT_PLAN
         return record["plan"]
-
-    async def get_streak(self, user_id: int) -> int:
-        """Return the user's streak, or 0 if no row exists."""
-
-        record = await self.get_plan_record(user_id)
-        if record is None:
-            return 0
-        return record["streak"]
 
     async def list_plans(self) -> list[dict[str, Any]]:
         """Return all plan rows as dicts.
@@ -747,43 +732,7 @@ class SheetsService:
             label=f"set_plan user={user_id}",
         )
 
-    async def set_streak(
-        self,
-        user_id: int,
-        streak: int,
-        username: Optional[str] = None,
-        plan: Optional[int] = None,
-    ) -> None:
-        """Upsert a user's streak, preserving their plan/username by default.
-
-        When ``username``/``plan`` are provided they override the stored values
-        (used by the weekly rollover for users with no prior plan row). Blocking
-        calls run in :func:`asyncio.to_thread` with transient-retry.
-        """
-
-        existing = await self.get_plan_record(user_id)
-        resolved_plan = plan if plan is not None else (
-            existing["plan"] if existing is not None else DEFAULT_PLAN
-        )
-        # Preserve existing username unless an override is supplied. We must read
-        # the raw username cell for that user; get_plan_record doesn't return it,
-        # so fetch from list_plans lazily only when needed.
-        resolved_username = username
-        if resolved_username is None:
-            resolved_username = ""
-            for entry in await self.list_plans():
-                if entry["user_id"] == user_id:
-                    resolved_username = entry["username"]
-                    break
-        await self._retry_blocking(
-            self._upsert_plan_sync,
-            user_id,
-            resolved_username,
-            resolved_plan,
-            streak,
-            label=f"set_streak user={user_id}",
-        )
-# ------------------------------------------------------------------ #
+    # ------------------------------------------------------------------ #
     # Pairs worksheet reads/writes (coach-created rounds)
     # ------------------------------------------------------------------ #
     def _read_all_pairs_sync(self) -> list[list[str]]:
