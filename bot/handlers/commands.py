@@ -7,9 +7,8 @@ Contains simple slash-command handlers:
 - ``/testsheet`` — verifies Google Sheets connectivity and Editor access.
 - ``/status`` — a consolidated health report across Telegram, Anthropic, and
   Google Sheets, plus the configured target chat and timezone.
-- ``/pairs`` — coaches & PAIRS_ADMIN_IDS, posts the current pairs board on
-  demand; ``/pairs stop`` ends the active round early.
-- ``/setpairs`` — coaches & PAIRS_ADMIN_IDS, starts a time-boxed pairs round.
+- ``/team`` — coaches & TEAM_ADMIN_IDS. A multi-line message creates the
+  week's teams; bare ``/team`` shows live standings; ``/team stop`` cancels.
 
 The commands work in any chat type (private, group, supergroup, channel) and,
 like the rest of the codebase, never crash on failure — errors are logged and
@@ -34,16 +33,11 @@ from telegram.ext import ContextTypes
 from bot.config import Settings
 from bot.services.leaderboard import LeaderboardService
 from bot.services.sheets import (
-    PAIRS_STATUS_CANCELLED,
+    TEAMS_STATUS_CANCELLED,
     SheetsService,
     check_sheets,
 )
-from bot.utils.dates import (
-    MAX_ROUND_DAYS,
-    MIN_ROUND_DAYS,
-    parse_duration_days,
-    today_in,
-)
+from bot.utils.dates import current_week_bounds, today_in
 from bot.utils.points import (
     DEFAULT_PLAN,
     MAX_PLAN,
@@ -61,22 +55,29 @@ _SETPLAN_USAGE = (
 )
 _COACH_ONLY_MSG = "Only a coach can set or view another member's plan."
 _SETPLAN_COACH_ONLY_MSG = "Only your coach can set up workouts for you."
-# Shown when someone who is neither a coach nor a PAIRS_ADMIN_IDS member tries
-# to run /setpairs or /pairs. Deliberately does not name who is allowed.
-_PAIRS_COACH_ONLY_MSG = (
-    "Only a coach or the pairs organiser can manage the pairs leaderboard."
+# Shown when someone who is neither a coach nor a TEAM_ADMIN_IDS member tries
+# to run /team. Deliberately does not name who is allowed.
+_TEAM_COACH_ONLY_MSG = (
+    "Only a coach or the team organiser can manage the team leaderboard."
 )
-# Accepted spellings of the /pairs argument that cancels the active round.
-_PAIRS_STOP_ARGS = frozenset({"stop", "cancel", "end"})
-_SETPAIRS_USAGE = (
-    "Usage (coach only): /setpairs <duration> <pair> [pair ...]\n"
-    "Example: /setpairs 1w @alice+@bob @carol+@dave\n"
-    "Duration: 1w, 2w, 10d… Each pair is two people joined by '+' "
-    "(@username or numeric ID)."
+# Accepted spellings of the /team argument that cancels the active round.
+_TEAM_STOP_ARGS = frozenset({"stop", "cancel", "end"})
+_TEAM_USAGE = (
+    "Usage (coach only) — one message, a team name per block:\n\n"
+    "/team\n"
+    "Team 1\n"
+    "Alexey B\n"
+    "Elena\n"
+    "Team 2\n"
+    "Marfa\n"
+    "Anastacia S\n\n"
+    "Any line that is NOT a known member name starts a new team. Names come "
+    "from the 'Members' tab of the Google Sheet — add people there first.\n"
+    "/team stop cancels the running round."
 )
 _NO_ACTIVE_ROUND_MSG = (
-    "No pairs competition is running right now, so no pairs are being tracked.\n"
-    "Start one with /setpairs — e.g. /setpairs 1w @alice+@bob @carol+@dave"
+    "No team competition is running right now, so no teams are being tracked.\n"
+    "Start one by sending /team with the teams listed underneath."
 )
 
 
@@ -150,7 +151,7 @@ def _get_leaderboard(
     leaderboard = context.application.bot_data.get("leaderboard")
     if isinstance(leaderboard, LeaderboardService):
         return leaderboard
-    logger.error("LeaderboardService not found in bot_data; /pairs unavailable.")
+    logger.error("LeaderboardService not found in bot_data; /team unavailable.")
     return None
 
 
@@ -513,61 +514,82 @@ async def myplan_command(
             f"{who} — plan: {plan} workouts/week.{note}",
         )
 
-async def _resolve_pair_member(
-    token: str, sheets: SheetsService
-) -> tuple[Optional[int], Optional[str]]:
-    """Resolve one ``/setpairs`` member token to a Telegram user id.
+def parse_team_message(
+    text: str, directory: dict[str, dict]
+) -> tuple[list[tuple[str, list[int]]], list[str], list[str]]:
+    """Parse a multi-line ``/team`` message into teams.
 
-    Accepts a raw numeric id or an ``@username`` (resolved through the ``Plans``
-    directory, which every poster refreshes automatically). Returns
-    ``(user_id, None)`` on success or ``(None, error_text)`` describing what to
-    fix — never raises.
+    The format is the one a coach naturally writes: a team name on its own
+    line, then one member per line, repeated. There is no marker distinguishing
+    a heading from a member, so the RULE IS THE DIRECTORY — a line that
+    resolves to a known member is a member, and any other non-empty line starts
+    a new team. That is why the ``Members`` tab has to be filled in first, and
+    why a misspelled name surfaces as an unexpected new team rather than
+    silently vanishing.
+
+    Args:
+        text: The full message text, ``/team`` line included.
+        directory: ``normalize_member_name`` → member dict, from
+            :meth:`SheetsService.member_directory`.
+
+    Returns:
+        ``(teams, unknown, duplicates)`` where ``teams`` is a list of
+        ``(name, [member_id, ...])`` in the order written, ``unknown`` lists
+        lines that started a team but look like a stray name (a heading with no
+        members under it), and ``duplicates`` lists members placed on more than
+        one team. The caller rejects the message if either list is non-empty.
     """
 
-    entry = (token or "").strip()
-    if not entry:
-        return None, "an empty member name"
+    lines = (text or "").splitlines()
+    # Drop the command itself, including a /team@BotName form and "stop".
+    if lines and lines[0].lstrip().startswith("/"):
+        lines = lines[1:]
 
-    if entry.lstrip("-").isdigit():
-        return int(entry), None
+    teams: list[tuple[str, list[int]]] = []
+    seen_members: dict[int, str] = {}
+    duplicates: list[str] = []
 
-    username = entry.lstrip("@")
-    if not username:
-        return None, "an empty @username"
-    user_id = await sheets.find_user_id_by_username(username)
-    if user_id is None:
-        return None, (
-            f"@{username} — I don't know their ID yet. Ask them to post a "
-            "workout once, or reply to their message with /whoami."
-        )
-    return user_id, None
+    for raw in lines:
+        line = raw.strip()
+        if not line:
+            continue
+        member = directory.get(SheetsService.normalize_member_name(line))
+        if member is None:
+            # Not a known member → this line names a new team.
+            teams.append((line, []))
+            continue
+        if not teams:
+            # A member before any team heading: start an unnamed team so the
+            # caller can report it rather than dropping the person.
+            teams.append((f"Team {len(teams) + 1}", []))
+        user_id = member["user_id"]
+        if user_id in seen_members:
+            duplicates.append(f"{member['name']} ({seen_members[user_id]})")
+            continue
+        seen_members[user_id] = teams[-1][0]
+        teams[-1][1].append(user_id)
+
+    # A heading with no members under it is almost always a misspelled name.
+    unknown = [name for name, members in teams if not members]
+    teams = [(name, members) for name, members in teams if members]
+    return teams, unknown, duplicates
 
 
-async def setpairs_command(
+async def team_command(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    """Create a time-boxed pairs competition round — COACHES & PAIRS ADMINS.
+    """Create (or stop) the weekly TEAM competition — COACHES & TEAM ADMINS.
 
-    Permitted for coaches AND anyone listed in ``PAIRS_ADMIN_IDS``
-    (:meth:`Settings.can_manage_pairs`); ``/setplan`` remains coach-only.
+    Forms:
+      - A multi-line ``/team`` message listing team names and their members
+        (see :data:`_TEAM_USAGE`) → creates a round for the CURRENT Mon–Sun
+        week. Re-running replaces any active round.
+      - ``/team stop`` → cancel the active round. No board is posted.
+      - ``/team`` alone → live standings of the active round.
 
-    Usage::
-
-        /setpairs 1w @alice+@bob @carol+@dave
-        /setpairs 10d 123456+789012
-
-    The first argument is how long the round lasts (``1w``/``2weeks``/``10d``);
-    each remaining argument is one pair joined by ``+``. The round starts TODAY
-    and covers whole calendar days (workouts carry a date, not a time), so
-    ``1w`` means today plus the next six days, inclusive.
-
-    While the round is active the bot counts those pairs' combined points; at
-    09:00 on the day AFTER it ends the final board is posted and the round is
-    closed. After that NOTHING is tracked or posted until a coach creates a new
-    round — the pairs feature is entirely opt-in per round.
-
-    Creating a round automatically supersedes (cancels) any still-active one, so
-    there is never more than one competition running.
+    Member names are resolved through the hand-maintained ``Members`` tab.
+    Nothing is saved unless EVERY name resolves and nobody appears twice: a
+    silently dropped member would quietly corrupt a whole week of scoring.
     """
 
     message = update.effective_message
@@ -583,206 +605,147 @@ async def setpairs_command(
         sheets = _get_sheets(context)
         if settings is None or sheets is None:
             await _safe_reply(
-                message, "❌ Could not create the pairs round — internal error."
+                message, "❌ Could not handle /team — internal error."
             )
             return
 
-        if not settings.can_manage_pairs(caller.id):
-            await _safe_reply(message, _PAIRS_COACH_ONLY_MSG)
+        if not settings.can_manage_teams(caller.id):
+            await _safe_reply(message, _TEAM_COACH_ONLY_MSG)
             return
 
         args = getattr(context, "args", None) or []
-        if len(args) < 2:
-            await _safe_reply(message, _SETPAIRS_USAGE)
-            return
+        text = message.text or ""
+        body_lines = [ln.strip() for ln in text.splitlines()[1:] if ln.strip()]
 
-        days = parse_duration_days(args[0])
-        if days is None:
+        # --- /team stop ------------------------------------------------- #
+        if args and args[0].strip().lower() in _TEAM_STOP_ARGS:
+            current = await sheets.get_current_team_round()
+            if current is None:
+                await _safe_reply(message, _NO_ACTIVE_ROUND_MSG)
+                return
+            await sheets.set_team_round_status(
+                current["round_id"], TEAMS_STATUS_CANCELLED
+            )
+            logger.info(
+                "Team round %s cancelled by %s.", current["round_id"], caller.id
+            )
             await _safe_reply(
                 message,
-                f"⚠️ '{args[0]}' isn't a valid duration. Use e.g. 1w, 2w or 10d "
-                f"({MIN_ROUND_DAYS}–{MAX_ROUND_DAYS} days).\n\n{_SETPAIRS_USAGE}",
+                "🛑 Team round stopped. No board will be posted and no teams "
+                "are being tracked. Send /team with a new line-up to start "
+                "another one.",
             )
             return
 
-        # Resolve every pair before writing anything, so a single bad name never
-        # creates a half-configured round.
-        pairs: list[tuple[int, int]] = []
-        problems: list[str] = []
-        for token in args[1:]:
-            members = token.split("+")
-            if len(members) != 2:
-                problems.append(
-                    f"'{token}' — a pair must be exactly two members joined by "
-                    "'+' (e.g. @alice+@bob)"
+        # --- /team alone → live standings -------------------------------- #
+        if not body_lines:
+            leaderboard = _get_leaderboard(context)
+            current = await sheets.get_current_team_round()
+            if current is None:
+                await _safe_reply(message, _NO_ACTIVE_ROUND_MSG)
+                return
+            if leaderboard is None:
+                await _safe_reply(
+                    message, "❌ Could not build the team board — internal error."
                 )
-                continue
-            member_a, error_a = await _resolve_pair_member(members[0], sheets)
-            member_b, error_b = await _resolve_pair_member(members[1], sheets)
-            for error in (error_a, error_b):
-                if error is not None:
-                    problems.append(error)
-            if member_a is None or member_b is None:
-                continue
-            if member_a == member_b:
-                problems.append(f"'{token}' — a pair needs two DIFFERENT people")
-                continue
-            pairs.append((member_a, member_b))
+                return
+            start_date, end_date = current["start_date"], current["end_date"]
+            entries = await leaderboard.aggregate_teams(
+                current["teams"], start_date, end_date
+            )
+            await _safe_reply(
+                message,
+                f"{leaderboard.format_teams(entries, start_date, end_date)}\n\n"
+                f"({start_date} – {end_date}, in progress)",
+            )
+            return
 
+        # --- /team <line-up> → create the round -------------------------- #
+        try:
+            directory = await sheets.member_directory()
+        except Exception as exc:
+            logger.error("Team: failed to read the Members directory: %s", exc)
+            await _safe_reply(
+                message,
+                "❌ Couldn't read the 'Members' tab of the sheet — try again.",
+            )
+            return
+
+        if not directory:
+            await _safe_reply(
+                message,
+                "⚠️ The 'Members' tab is empty, so I don't know anyone's name "
+                "yet. Fill in name / username / telegram_id there first "
+                "(use /whoami to find an ID).",
+            )
+            return
+
+        teams, unknown, duplicates = parse_team_message(text, directory)
+
+        problems: list[str] = []
+        if unknown:
+            problems.append(
+                "I don't know these names (or the team under them was empty): "
+                + ", ".join(unknown)
+            )
+        if duplicates:
+            problems.append(
+                "These people are on more than one team: " + ", ".join(duplicates)
+            )
+        if not teams:
+            problems.append("I couldn't find any team with members in it.")
         if problems:
             await _safe_reply(
                 message,
-                "⚠️ Couldn't create the pairs round:\n"
-                + "\n".join(f"• {problem}" for problem in problems),
-            )
-            return
-        if not pairs:
-            await _safe_reply(message, _SETPAIRS_USAGE)
-            return
-
-        duplicates = [
-            member for member in
-            [m for pair in pairs for m in pair]
-            if [m for pair in pairs for m in pair].count(member) > 1
-        ]
-        if duplicates:
-            await _safe_reply(
-                message,
-                "⚠️ Someone appears in more than one pair. Each person can only "
-                "be in a single pair.",
+                "⚠️ Nothing saved — fix this and send /team again:\n\n"
+                + "\n\n".join(f"• {problem}" for problem in problems)
+                + "\n\nNames come from the 'Members' tab of the sheet.",
             )
             return
 
-        start_date = today_in(settings.timezone)
-        end_date = start_date + timedelta(days=days - 1)
+        start_date, end_date = current_week_bounds(settings.timezone)
 
-        # Supersede any still-running round so only one is ever active.
-        previous = await sheets.get_current_pairs_round()
+        previous = await sheets.get_current_team_round()
         if previous is not None:
-            await sheets.set_pairs_round_status(
-                previous["round_id"], PAIRS_STATUS_CANCELLED
+            await sheets.set_team_round_status(
+                previous["round_id"], TEAMS_STATUS_CANCELLED
+            )
+            logger.info(
+                "Team: replacing active round %s.", previous["round_id"]
             )
 
-        round_id = f"{start_date.isoformat()}-{uuid4().hex[:6]}"
-        await sheets.create_pairs_round(
+        round_id = uuid4().hex[:8]
+        await sheets.create_team_round(
             round_id=round_id,
             start_date=start_date,
             end_date=end_date,
-            pairs=pairs,
+            teams=teams,
             created_by=caller.id,
         )
 
-        lines = [
-            f"✅ Pairs round created — {len(pairs)} "
-            f"pair{'s' if len(pairs) != 1 else ''}, {days} day"
-            f"{'s' if days != 1 else ''}.",
-            f"Counting workouts dated {start_date} – {end_date} (inclusive).",
-            f"Final board posts {end_date + timedelta(days=1)} at 09:00.",
-        ]
-        if previous is not None:
-            lines.append("The previous round was cancelled and replaced.")
-        await _safe_reply(message, "\n".join(lines))
+        roster = "\n".join(
+            f"{name} ({len(members)})" for name, members in teams
+        )
+        replaced = " Previous round replaced." if previous is not None else ""
+        await _safe_reply(
+            message,
+            f"✅ Teams set for {start_date} – {end_date}:\n\n{roster}\n\n"
+            f"The board posts Monday 09:05.{replaced}",
+        )
         logger.info(
-            "Pairs round %s created by %s: %d pairs, %s–%s.",
+            "Team round %s created by %s: %d teams, %s–%s.",
             round_id,
             caller.id,
-            len(pairs),
+            len(teams),
             start_date,
             end_date,
         )
-    except Exception as exc:  # noqa: BLE001 - defensive: never fail silently
-        logger.error("Unexpected error handling /setpairs: %s", exc, exc_info=exc)
+    except Exception as exc:  # noqa: BLE001 - never fail silently
+        logger.error("Unexpected error handling /team: %s", exc, exc_info=exc)
         await _safe_reply(
-            message, "⚠️ Something went wrong creating the pairs round. Try again."
+            message, "⚠️ Something went wrong with /team. Try again."
         )
 
-
-async def pairs_command(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> None:
-    """Show (or stop) the CURRENT pairs round — COACHES & PAIRS ADMINS.
-
-    Permitted for coaches AND anyone listed in ``PAIRS_ADMIN_IDS``
-    (:meth:`Settings.can_manage_pairs`) — a narrower role than ``/setplan``,
-    which stays coach-only. Uses the same aggregation/formatting as the
-    scheduled final board.
-
-    - ``/pairs`` → live standings of the active round, over the round's OWN
-      window (see :func:`setpairs_command`). When no round is active it says so
-      and points at ``/setpairs`` — the bot tracks nothing until one exists.
-    - ``/pairs stop`` → cancel the active round immediately. No final board is
-      posted and nothing is tracked afterwards.
-
-    Intentionally NOT advertised in the public command menu (like ``/setplan``).
-    """
-
-    message = update.effective_message
-    if message is None:
-        return
-
-    try:
-        caller = message.from_user
-        if caller is None:
-            return
-
-        settings = _get_settings(context)
-        sheets = _get_sheets(context)
-        if settings is None or sheets is None:
-            await _safe_reply(
-                message, "❌ Could not build the pairs board — internal error."
-            )
-            return
-
-        if not settings.can_manage_pairs(caller.id):
-            await _safe_reply(message, _PAIRS_COACH_ONLY_MSG)
-            return
-
-        current = await sheets.get_current_pairs_round()
-        if current is None:
-            await _safe_reply(message, _NO_ACTIVE_ROUND_MSG)
-            return
-
-        args = getattr(context, "args", None) or []
-        if args and args[0].strip().lower() in _PAIRS_STOP_ARGS:
-            await sheets.set_pairs_round_status(
-                current["round_id"], PAIRS_STATUS_CANCELLED
-            )
-            logger.info(
-                "Pairs round %s cancelled by %s.", current["round_id"], caller.id
-            )
-            await _safe_reply(
-                message,
-                "🛑 Pairs round stopped. No final board will be posted and no "
-                "pairs are being tracked. Use /setpairs to start a new one.",
-            )
-            return
-
-        leaderboard = _get_leaderboard(context)
-        if leaderboard is None:
-            await _safe_reply(
-                message, "❌ Could not build the pairs board — internal error."
-            )
-            return
-
-        start_date = current["start_date"]
-        end_date = current["end_date"]
-        entries = await leaderboard.aggregate_pairs(
-            current["members"], start_date, end_date
-        )
-        today = today_in(settings.timezone)
-        state = (
-            "in progress" if today <= end_date else "finished, awaiting the board"
-        )
-        await _safe_reply(
-            message,
-            f"{leaderboard.format_pairs(entries, start_date, end_date)}\n\n"
-            f"({start_date} – {end_date}, {state})",
-        )
-    except Exception as exc:  # noqa: BLE001 - defensive: never fail silently
-        logger.error("Unexpected error handling /pairs: %s", exc, exc_info=exc)
-        await _safe_reply(
-            message, "⚠️ Something went wrong building the pairs board. Try again."
-        )
 
 async def _safe_reply(message, text: str) -> None:
     """Send a plain-text reply, swallowing/ logging any Telegram failure."""

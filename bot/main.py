@@ -23,10 +23,9 @@ from bot.config import ConfigError, Settings, get_settings
 from bot.handlers.commands import (
     chatid_command,
     myplan_command,
-    pairs_command,
-    setpairs_command,
     setplan_command,
     status_command,
+    team_command,
     testsheet_command,
     whoami_command,
 )
@@ -96,6 +95,8 @@ def build_application(settings: Settings) -> Application:
     # work however it is reasonably spelled. Aliases are deliberately close
     # variants of our own names only — never generic words like "plan" — so
     # the bot can't answer commands aimed at another bot in the group.
+    # NOTE: /team must stay a MULTI-LINE command — PTB passes only the first
+    # line as context.args, so team_command reads message.text itself.
     application.add_handler(
         CommandHandler(["setplan", "setmyplan", "setuserplan", "setplans"],
                        setplan_command)
@@ -103,10 +104,7 @@ def build_application(settings: Settings) -> Application:
     application.add_handler(
         CommandHandler(["myplan", "myplans"], myplan_command)
     )
-    application.add_handler(CommandHandler(["pairs", "pair"], pairs_command))
-    application.add_handler(
-        CommandHandler(["setpairs", "setpair"], setpairs_command)
-    )
+    application.add_handler(CommandHandler(["team", "teams"], team_command))
 
     # Register a global error handler so exceptions in the update loop are
     # logged cleanly (and Conflict is special-cased) instead of bubbling up.
@@ -136,10 +134,10 @@ def build_application(settings: Settings) -> Application:
         # autocomplete list). Default scope + default language is sufficient to
         # surface these in every chat (private + groups). Best-effort: if this
         # fails we log a WARNING and keep running — the bot must still start.
-        # Note: /setplan, /pairs and /setpairs are intentionally NOT advertised
-        # in the public command menu — they are coach-only (regular users cannot
-        # set up their own workouts or pairs). Their handlers are still
-        # registered so coaches can use them.
+        # Note: /setplan and /team are intentionally NOT advertised in the
+        # public command menu — they are coach-only (regular users cannot set
+        # up their own workouts or teams). Their handlers are still registered
+        # so coaches can use them.
         commands = [
             BotCommand("myplan", "Show your weekly plan"),
             BotCommand("whoami", "Show your Telegram ID (or reply to someone)"),

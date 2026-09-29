@@ -29,7 +29,8 @@ _SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 WORKSHEET_NAME = "Log"
 PLANS_WORKSHEET_NAME = "Plans"
-PAIRS_WORKSHEET_NAME = "Pairs"
+TEAMS_WORKSHEET_NAME = "Teams"
+MEMBERS_WORKSHEET_NAME = "Members"
 
 # Append retry policy: up to 3 attempts with exponential backoff (1s, 2s, 4s).
 _APPEND_MAX_ATTEMPTS = 3
@@ -108,34 +109,50 @@ _PLAN_COL_PLAN = 2
 _PLAN_COL_STREAK = 3
 _PLAN_COL_UPDATED_AT = 4
 
-# --- Pairs worksheet ------------------------------------------------------ #
-# One row per coach-created pairs ROUND. A round has an explicit start/end date
-# (inclusive) and is only counted while it is active; when it ends the final
-# board is posted and the round is marked ``posted`` so nothing is posted again.
-# Rounds are never deleted, so the history stays auditable.
-PAIRS_HEADER_ROW = [
+# --- Members worksheet ---------------------------------------------------- #
+# A hand-maintained directory mapping the NAME a coach writes in /team to a
+# Telegram account. The bot creates the sheet with this header and never writes
+# to it — it is filled in by hand, which is the point: the coach can add people
+# and fix spellings without a deploy.
+MEMBERS_HEADER_ROW = [
+    "name",
+    "username",
+    "telegram_id",
+]
+
+# Column indices (0-based) for the Members worksheet.
+_MEMBER_COL_NAME = 0
+_MEMBER_COL_USERNAME = 1
+_MEMBER_COL_USER_ID = 2
+
+# --- Teams worksheet ------------------------------------------------------ #
+# One row per coach-created TEAM ROUND. A round covers one Mon-Sun week and is
+# only counted while active; the board posts with the Monday leaderboards and
+# the round is then marked ``posted`` so nothing is reported twice. Rounds are
+# never deleted, so the history stays auditable.
+TEAMS_HEADER_ROW = [
     "round_id",
     "start_date",
     "end_date",
-    "members",
+    "teams",
     "status",
     "created_by",
     "created_at",
 ]
 
-# Column indices (0-based) for the Pairs worksheet.
-_PAIRS_COL_ROUND_ID = 0
-_PAIRS_COL_START_DATE = 1
-_PAIRS_COL_END_DATE = 2
-_PAIRS_COL_MEMBERS = 3
-_PAIRS_COL_STATUS = 4
-_PAIRS_COL_CREATED_BY = 5
-_PAIRS_COL_CREATED_AT = 6
+# Column indices (0-based) for the Teams worksheet.
+_TEAMS_COL_ROUND_ID = 0
+_TEAMS_COL_START_DATE = 1
+_TEAMS_COL_END_DATE = 2
+_TEAMS_COL_TEAMS = 3
+_TEAMS_COL_STATUS = 4
+_TEAMS_COL_CREATED_BY = 5
+_TEAMS_COL_CREATED_AT = 6
 
-# Pairs round lifecycle.
-PAIRS_STATUS_ACTIVE = "active"      # counting; the board has not been posted yet
-PAIRS_STATUS_POSTED = "posted"      # finished and the final board was posted
-PAIRS_STATUS_CANCELLED = "cancelled"  # stopped early by a coach
+# Team round lifecycle.
+TEAMS_STATUS_ACTIVE = "active"        # counting; the board has not posted yet
+TEAMS_STATUS_POSTED = "posted"        # finished and the final board was posted
+TEAMS_STATUS_CANCELLED = "cancelled"  # stopped early by a coach
 
 
 class SheetsService:
@@ -165,7 +182,8 @@ class SheetsService:
         self._client: Optional[gspread.Client] = None
         self._worksheet: Optional[gspread.Worksheet] = None
         self._plans_worksheet: Optional[gspread.Worksheet] = None
-        self._pairs_worksheet: Optional[gspread.Worksheet] = None
+        self._teams_worksheet: Optional[gspread.Worksheet] = None
+        self._members_worksheet: Optional[gspread.Worksheet] = None
 
     # ------------------------------------------------------------------ #
     # Initialization
@@ -218,27 +236,54 @@ class SheetsService:
 
         self._plans_worksheet = plans_ws
 
-        # Ensure the Pairs worksheet exists / has the correct header row, using
-        # the same auto-create/repair behaviour as the Log and Plans tabs.
+        # Ensure the Teams worksheet exists / has the correct header row,
+        # using the same auto-create/repair behaviour as the Log and Plans tabs.
         try:
-            pairs_ws = spreadsheet.worksheet(PAIRS_WORKSHEET_NAME)
+            teams_ws = spreadsheet.worksheet(TEAMS_WORKSHEET_NAME)
         except gspread.WorksheetNotFound:
-            pairs_ws = spreadsheet.add_worksheet(
-                title=PAIRS_WORKSHEET_NAME, rows=1000, cols=len(PAIRS_HEADER_ROW)
+            teams_ws = spreadsheet.add_worksheet(
+                title=TEAMS_WORKSHEET_NAME, rows=1000, cols=len(TEAMS_HEADER_ROW)
             )
-            pairs_ws.update(values=[PAIRS_HEADER_ROW], range_name="A1")
+            teams_ws.update(values=[TEAMS_HEADER_ROW], range_name="A1")
             logger.info(
-                "Created worksheet %r with header row.", PAIRS_WORKSHEET_NAME
+                "Created worksheet %r with header row.", TEAMS_WORKSHEET_NAME
             )
         else:
-            existing_pairs = pairs_ws.row_values(1)
-            if existing_pairs != PAIRS_HEADER_ROW:
-                pairs_ws.update(values=[PAIRS_HEADER_ROW], range_name="A1")
+            existing_teams = teams_ws.row_values(1)
+            if existing_teams != TEAMS_HEADER_ROW:
+                teams_ws.update(values=[TEAMS_HEADER_ROW], range_name="A1")
                 logger.info(
-                    "Reset header row on worksheet %r.", PAIRS_WORKSHEET_NAME
+                    "Reset header row on worksheet %r.", TEAMS_WORKSHEET_NAME
                 )
 
-        self._pairs_worksheet = pairs_ws
+        self._teams_worksheet = teams_ws
+
+        # Ensure the Members directory exists. Created empty (header only) and
+        # NEVER written to by the bot — a coach fills it in by hand so /team can
+        # resolve the names they actually type. The header is repaired like the
+        # others, but existing rows are left completely alone.
+        try:
+            members_ws = spreadsheet.worksheet(MEMBERS_WORKSHEET_NAME)
+        except gspread.WorksheetNotFound:
+            members_ws = spreadsheet.add_worksheet(
+                title=MEMBERS_WORKSHEET_NAME,
+                rows=1000,
+                cols=len(MEMBERS_HEADER_ROW),
+            )
+            members_ws.update(values=[MEMBERS_HEADER_ROW], range_name="A1")
+            logger.info(
+                "Created worksheet %r with header row (fill it in by hand).",
+                MEMBERS_WORKSHEET_NAME,
+            )
+        else:
+            existing_members = members_ws.row_values(1)
+            if existing_members != MEMBERS_HEADER_ROW:
+                members_ws.update(values=[MEMBERS_HEADER_ROW], range_name="A1")
+                logger.info(
+                    "Reset header row on worksheet %r.", MEMBERS_WORKSHEET_NAME
+                )
+
+        self._members_worksheet = members_ws
 
     async def initialize(self) -> None:
         """Authorize and prepare the worksheet (creating it if missing)."""
@@ -251,10 +296,15 @@ class SheetsService:
             raise RuntimeError("SheetsService not initialized; call initialize().")
         return self._worksheet
 
-    def _require_pairs_worksheet(self) -> gspread.Worksheet:
-        if self._pairs_worksheet is None:
+    def _require_teams_worksheet(self) -> gspread.Worksheet:
+        if self._teams_worksheet is None:
             raise RuntimeError("SheetsService not initialized; call initialize().")
-        return self._pairs_worksheet
+        return self._teams_worksheet
+
+    def _require_members_worksheet(self) -> gspread.Worksheet:
+        if self._members_worksheet is None:
+            raise RuntimeError("SheetsService not initialized; call initialize().")
+        return self._members_worksheet
 
     def _require_plans_worksheet(self) -> gspread.Worksheet:
         if self._plans_worksheet is None:
@@ -733,172 +783,252 @@ class SheetsService:
         )
 
     # ------------------------------------------------------------------ #
-    # Pairs worksheet reads/writes (coach-created rounds)
+    # Members directory (hand-maintained name -> Telegram account)
     # ------------------------------------------------------------------ #
-    def _read_all_pairs_sync(self) -> list[list[str]]:
-        """Return all Pairs rows (including header) as lists of strings."""
+    def _read_all_members_sync(self) -> list[list[str]]:
+        """Return all Members rows (including header) as lists of strings."""
 
-        worksheet = self._require_pairs_worksheet()
-        return worksheet.get_all_values()
-
-    @staticmethod
-    def _serialize_members(pairs: Sequence[tuple[int, int]]) -> str:
-        """Serialize pairs to the ``id+id,id+id`` cell format.
-
-        Deliberately the SAME syntax the legacy ``PAIRS`` env var used, so the
-        stored value stays readable and hand-editable in the sheet.
-        """
-
-        return ",".join(f"{a}+{b}" for a, b in pairs)
+        return self._require_members_worksheet().get_all_values()
 
     @staticmethod
-    def _parse_members(raw: str) -> list[tuple[int, int]]:
-        """Parse an ``id+id,id+id`` members cell, skipping malformed entries.
+    def normalize_member_name(name: str) -> str:
+        """Return the matching key for a member name.
 
-        Never raises: a hand-edited/corrupt cell degrades to the entries that
-        do parse rather than breaking the scheduled board.
+        Case-insensitive and whitespace-tolerant, so "Alexey  B", "alexey b"
+        and " Alexey B " all resolve to the same person. Nothing else is
+        stripped: "Alexey B" and "Alexey V" must stay distinct.
         """
 
-        pairs: list[tuple[int, int]] = []
-        for token in (raw or "").split(","):
-            entry = token.strip()
+        return " ".join((name or "").strip().lower().split())
+
+    async def list_members(self) -> list[dict[str, Any]]:
+        """Return the Members directory as ``{name, username, user_id}`` dicts.
+
+        Rows without a usable ``telegram_id`` are skipped with a warning: the
+        sheet is hand-edited, and a half-filled row must degrade to "this name
+        is unknown" (which /team reports) rather than break the command.
+        """
+
+        rows = await asyncio.to_thread(self._read_all_members_sync)
+        members: list[dict[str, Any]] = []
+        for row in rows[1:]:  # skip header
+            if len(row) <= _MEMBER_COL_NAME:
+                continue
+            name = row[_MEMBER_COL_NAME].strip()
+            if not name:
+                continue
+            raw_id = (
+                row[_MEMBER_COL_USER_ID].strip()
+                if len(row) > _MEMBER_COL_USER_ID
+                else ""
+            )
+            try:
+                user_id = int(raw_id)
+            except ValueError:
+                logger.warning(
+                    "Members: row %r has no usable telegram_id (%r); skipping.",
+                    name,
+                    raw_id,
+                )
+                continue
+            username = (
+                row[_MEMBER_COL_USERNAME].strip().lstrip("@")
+                if len(row) > _MEMBER_COL_USERNAME
+                else ""
+            )
+            members.append(
+                {"name": name, "username": username, "user_id": user_id}
+            )
+        return members
+
+    async def member_directory(self) -> dict[str, dict[str, Any]]:
+        """Return the Members directory keyed by :meth:`normalize_member_name`.
+
+        Also keys each member by their ``@username`` (without the ``@``) when
+        present, so a coach may write either the name or the username. A later
+        duplicate key is ignored and logged rather than silently overwriting.
+        """
+
+        directory: dict[str, dict[str, Any]] = {}
+        for member in await self.list_members():
+            keys = [self.normalize_member_name(member["name"])]
+            if member["username"]:
+                keys.append(self.normalize_member_name(member["username"]))
+            for key in keys:
+                if key in directory and directory[key]["user_id"] != member["user_id"]:
+                    logger.warning(
+                        "Members: duplicate entry %r; keeping the first.", key
+                    )
+                    continue
+                directory[key] = member
+        return directory
+
+    # ------------------------------------------------------------------ #
+    # Teams worksheet reads/writes (coach-created rounds)
+    # ------------------------------------------------------------------ #
+    def _read_all_teams_sync(self) -> list[list[str]]:
+        """Return all Teams rows (including header) as lists of strings."""
+
+        return self._require_teams_worksheet().get_all_values()
+
+    @staticmethod
+    def serialize_teams(teams: Sequence[tuple[str, Sequence[int]]]) -> str:
+        """Serialize teams to the ``Name=id,id|Name=id,id`` cell format.
+
+        Chosen over JSON so the cell stays readable and hand-editable in the
+        sheet, the same reasoning as the old pairs format. ``|`` separates
+        teams, ``=`` separates a team's name from its members, ``,`` separates
+        member ids — so a team name may not contain ``|`` or ``=`` (the command
+        rejects such names before they reach here).
+        """
+
+        return "|".join(
+            f"{name}=" + ",".join(str(member_id) for member_id in members)
+            for name, members in teams
+        )
+
+    @staticmethod
+    def parse_teams(raw: str) -> list[tuple[str, list[int]]]:
+        """Parse a ``Name=id,id|Name=id,id`` teams cell.
+
+        Never raises: a hand-edited or corrupt cell degrades to the entries
+        that do parse, so a typo in the sheet cannot break the scheduled board.
+        """
+
+        teams: list[tuple[str, list[int]]] = []
+        for chunk in (raw or "").split("|"):
+            entry = chunk.strip()
             if not entry:
                 continue
-            members = entry.split("+")
-            if len(members) != 2:
-                logger.warning("Pairs: skipping malformed members entry %r.", entry)
+            name, separator, members_raw = entry.partition("=")
+            if not separator:
+                logger.warning("Teams: skipping malformed entry %r.", entry)
                 continue
-            try:
-                pairs.append((int(members[0].strip()), int(members[1].strip())))
-            except ValueError:
-                logger.warning("Pairs: skipping non-integer members entry %r.", entry)
-        return pairs
+            member_ids: list[int] = []
+            for token in members_raw.split(","):
+                token = token.strip()
+                if not token:
+                    continue
+                try:
+                    member_ids.append(int(token))
+                except ValueError:
+                    logger.warning(
+                        "Teams: skipping non-integer member %r in %r.",
+                        token,
+                        entry,
+                    )
+            if not member_ids:
+                logger.warning("Teams: entry %r has no members; skipping.", entry)
+                continue
+            teams.append((name.strip(), member_ids))
+        return teams
 
-    def _parse_pairs_row(self, row: list[str]) -> Optional[dict[str, Any]]:
-        """Parse one Pairs row into a dict, or ``None`` if unusable."""
+    def _parse_teams_row(self, row: list[str]) -> Optional[dict[str, Any]]:
+        """Parse one Teams row into a dict, or None when unusable."""
 
-        if len(row) <= _PAIRS_COL_STATUS:
+        if len(row) <= _TEAMS_COL_STATUS:
             return None
         try:
-            start_date = date.fromisoformat(row[_PAIRS_COL_START_DATE].strip())
-            end_date = date.fromisoformat(row[_PAIRS_COL_END_DATE].strip())
+            start_date = date.fromisoformat(row[_TEAMS_COL_START_DATE].strip())
+            end_date = date.fromisoformat(row[_TEAMS_COL_END_DATE].strip())
         except (ValueError, IndexError):
+            logger.warning("Teams: skipping row with unparseable dates.")
             return None
-        members = self._parse_members(row[_PAIRS_COL_MEMBERS])
-        if not members:
+        teams = self.parse_teams(row[_TEAMS_COL_TEAMS])
+        if not teams:
             return None
         return {
-            "round_id": row[_PAIRS_COL_ROUND_ID].strip(),
+            "round_id": row[_TEAMS_COL_ROUND_ID].strip(),
             "start_date": start_date,
             "end_date": end_date,
-            "members": members,
-            "status": row[_PAIRS_COL_STATUS].strip().lower(),
+            "teams": teams,
+            "status": row[_TEAMS_COL_STATUS].strip().lower(),
             "created_by": (
-                row[_PAIRS_COL_CREATED_BY]
-                if len(row) > _PAIRS_COL_CREATED_BY
+                row[_TEAMS_COL_CREATED_BY]
+                if len(row) > _TEAMS_COL_CREATED_BY
                 else ""
             ),
         }
 
-    async def list_pairs_rounds(self) -> list[dict[str, Any]]:
-        """Return every parsable pairs round, oldest first.
+    async def list_team_rounds(self) -> list[dict[str, Any]]:
+        """Return every parseable Teams round, in sheet order."""
 
-        Each dict has ``round_id`` (str), ``start_date``/``end_date``
-        (:class:`datetime.date`), ``members`` (list of ``(a, b)`` id tuples),
-        ``status`` (str) and ``created_by`` (str). Unparseable rows are skipped.
-        """
-
-        rows = await asyncio.to_thread(self._read_all_pairs_sync)
-        parsed: list[dict[str, Any]] = []
+        rows = await asyncio.to_thread(self._read_all_teams_sync)
+        rounds: list[dict[str, Any]] = []
         for row in rows[1:]:  # skip header
-            record = self._parse_pairs_row(row)
+            record = self._parse_teams_row(row)
             if record is not None:
-                parsed.append(record)
-        return parsed
+                rounds.append(record)
+        return rounds
 
-    async def get_current_pairs_round(self) -> Optional[dict[str, Any]]:
-        """Return the newest round still awaiting its final board, else ``None``.
+    async def get_current_team_round(self) -> Optional[dict[str, Any]]:
+        """Return the ACTIVE team round, or ``None`` when there is none.
 
-        A round qualifies while its status is ``active`` — whether or not its
-        end date has passed. A round whose window has closed but has not yet
-        been posted is therefore still returned, so the scheduler can pick it up
-        (and so a misfire/restart can't lose the final board). ``None`` means no
-        pairs competition is configured: NOTHING is tracked or posted.
-
-        The LAST matching row wins, so re-running ``/setpairs`` supersedes an
-        earlier round.
+        The last active row wins, so re-running /team (which cancels the
+        previous round first) always reads back the newest one.
         """
 
-        rounds = await self.list_pairs_rounds()
         current: Optional[dict[str, Any]] = None
-        for record in rounds:
-            if record["status"] == PAIRS_STATUS_ACTIVE:
-                current = record  # keep scanning; the newest row wins
+        for record in await self.list_team_rounds():
+            if record["status"] == TEAMS_STATUS_ACTIVE:
+                current = record
         return current
 
-    def _append_pairs_round_sync(self, values: list[str]) -> None:
-        worksheet = self._require_pairs_worksheet()
-        worksheet.append_row(values, value_input_option="RAW")
+    def _append_teams_round_sync(self, values: list[str]) -> None:
+        self._require_teams_worksheet().append_row(
+            values, value_input_option="RAW"
+        )
 
-    async def create_pairs_round(
+    async def create_team_round(
         self,
         round_id: str,
         start_date: date,
         end_date: date,
-        pairs: Sequence[tuple[int, int]],
+        teams: Sequence[tuple[str, Sequence[int]]],
         created_by: int,
     ) -> None:
-        """Append a new ``active`` pairs round.
-
-        The caller is responsible for closing any previous round first (see
-        :meth:`set_pairs_round_status`), so at most one round is ever active.
-        Retries transient failures with the shared backoff policy.
-        """
+        """Append a new ACTIVE team round covering ``[start_date, end_date]``."""
 
         values = [
             round_id,
             start_date.isoformat(),
             end_date.isoformat(),
-            self._serialize_members(pairs),
-            PAIRS_STATUS_ACTIVE,
+            self.serialize_teams(teams),
+            TEAMS_STATUS_ACTIVE,
             str(created_by),
             self._now_iso(),
         ]
         await self._retry_blocking(
-            self._append_pairs_round_sync,
+            self._append_teams_round_sync,
             values,
-            label=f"create_pairs_round {round_id}",
+            label=f"create_team_round {round_id}",
         )
 
-    def _set_pairs_status_sync(self, round_id: str, status: str) -> None:
-        """Blocking status update for a single round row (by ``round_id``)."""
-
-        worksheet = self._require_pairs_worksheet()
+    def _set_teams_status_sync(self, round_id: str, status: str) -> None:
+        worksheet = self._require_teams_worksheet()
         rows = worksheet.get_all_values()
         for offset, row in enumerate(rows[1:], start=2):  # header is row 1
-            if len(row) <= _PAIRS_COL_ROUND_ID:
+            if len(row) <= _TEAMS_COL_ROUND_ID:
                 continue
-            if row[_PAIRS_COL_ROUND_ID].strip() != round_id:
+            if row[_TEAMS_COL_ROUND_ID].strip() != round_id:
                 continue
-            column = chr(ord("A") + _PAIRS_COL_STATUS)
+            column = chr(ord("A") + _TEAMS_COL_STATUS)
             worksheet.update(
                 values=[[status]],
                 range_name=f"{column}{offset}",
                 value_input_option="RAW",
             )
             return
-        logger.warning(
-            "Pairs: round %r not found while setting status %r.", round_id, status
-        )
+        logger.warning("Teams: round %r not found; status not updated.", round_id)
 
-    async def set_pairs_round_status(self, round_id: str, status: str) -> None:
-        """Mark a round ``posted`` or ``cancelled`` so it stops being tracked."""
+    async def set_team_round_status(self, round_id: str, status: str) -> None:
+        """Set a team round's status (``posted`` / ``cancelled``)."""
 
         await self._retry_blocking(
-            self._set_pairs_status_sync,
+            self._set_teams_status_sync,
             round_id,
             status,
-            label=f"set_pairs_round_status {round_id}={status}",
+            label=f"set_team_round_status {round_id}",
         )
 
     async def _retry_blocking(

@@ -1,11 +1,10 @@
 """Scheduler service.
 
 Configures an :class:`~apscheduler.schedulers.asyncio.AsyncIOScheduler` with
-cron jobs for the **pairs round** board (daily 09:00 — posts only when a
-coach-created round has ended, so a round finishing Sunday is reported Monday
-09:00), the weekly individual leaderboard (Mon 09:05) and the monthly
-leaderboard (1st 09:00). The scheduler must be started on the same asyncio loop
-as python-telegram-bot (via a PTB post-init hook).
+cron jobs for the weekly boards (Mon 09:05 — the coach-created TEAM board
+followed by the individual leaderboard) and the monthly leaderboard (1st
+09:00). The scheduler must be started on the same asyncio loop as
+python-telegram-bot (via a PTB post-init hook).
 """
 
 from __future__ import annotations
@@ -20,7 +19,7 @@ from telegram import Bot
 from telegram.error import TelegramError
 
 from bot.services.leaderboard import LeaderboardService
-from bot.services.sheets import PAIRS_STATUS_POSTED, SheetsService
+from bot.services.sheets import TEAMS_STATUS_POSTED, SheetsService
 from bot.utils.dates import (
     previous_month_bounds,
     previous_week_bounds,
@@ -37,11 +36,18 @@ async def run_weekly_leaderboard(
     target_chat_id: int,
     tz: str,
 ) -> None:
-    """Post the previous week's leaderboard.
+    """Post the team board, then the previous week's individual leaderboard.
 
-    Aggregated
-    so this week's board reflects them.
+    The team board goes FIRST so the two read as one Monday post: teams, then
+    everyone's personal totals. It is a no-op when no team round is active, and
+    its failures are swallowed inside :func:`run_weekly_team_board`, so the
+    individual board always posts regardless.
     """
+
+    try:
+        await run_weekly_team_board(bot, leaderboard, sheets, target_chat_id, tz)
+    except Exception as exc:  # noqa: BLE001 - never block the individual board
+        logger.error("Team board raised; continuing to the individual board: %s", exc)
 
     start_date, end_date = previous_week_bounds(tz)
     try:
@@ -58,59 +64,54 @@ async def run_weekly_leaderboard(
         logger.error("Failed to send weekly leaderboard: %s", exc)
 
 
-async def run_pairs_round_board(
+async def run_weekly_team_board(
     bot: Bot,
     leaderboard: LeaderboardService,
     sheets: SheetsService,
     target_chat_id: int,
     tz: str,
 ) -> None:
-    """Post the FINAL board for a coach-created pairs round that has ended.
+    """Post the TEAM board for the just-finished week, then retire the round.
 
-    Runs daily at 09:00 and does nothing unless an ``active`` round exists whose
-    ``end_date`` has passed — i.e. the board posts at 09:00 on the day AFTER the
-    round ends (a round ending Sunday posts Monday 09:00, matching the old fixed
-    schedule). If no round is configured, or the current one is still running,
-    this is a silent no-op: **pairs are only tracked while a round is active**.
+    Called at the start of the Monday 09:05 job, so the team board lands just
+    above the individual one. A silent no-op unless an ``active`` round exists
+    whose week has ended: teams are only tracked while a round is active, and
+    a round created mid-week is reported on the following Monday.
 
-    Once posted, the round is marked ``posted`` so it is never reported twice —
-    the guard also makes a scheduler misfire/restart safe. A round whose window
-    closed while the bot was down is still picked up on the next daily run,
-    rather than being lost.
-
-    Failures are logged and swallowed so this can never prevent the individual
-    weekly board (a separate job) from posting.
+    Once posted the round is marked ``posted`` so it can never be reported
+    twice (which also makes a scheduler misfire or a restart safe). The status
+    is written LAST, only after a confirmed send, so a failed send leaves the
+    round active and it is retried next Monday.
     """
 
     try:
-        current = await sheets.get_current_pairs_round()
+        current = await sheets.get_current_team_round()
     except Exception as exc:
-        logger.error("Pairs board: failed to read the current round: %s", exc)
+        logger.error("Team board: failed to read the current round: %s", exc)
         return
 
     if current is None:
-        logger.debug("No active pairs round; nothing to post.")
+        logger.debug("No active team round; nothing to post.")
         return
 
     today = today_in(tz)
     end_date = current["end_date"]
     if today <= end_date:
         logger.debug(
-            "Pairs round %s runs until %s; not posting yet.",
+            "Team round %s runs until %s; not posting yet.",
             current["round_id"],
             end_date,
         )
         return
 
     start_date = current["start_date"]
-
     try:
-        entries = await leaderboard.aggregate_pairs(
-            current["members"], start_date, end_date
+        entries = await leaderboard.aggregate_teams(
+            current["teams"], start_date, end_date
         )
-        message = leaderboard.format_pairs(entries, start_date, end_date)
+        message = leaderboard.format_teams(entries, start_date, end_date)
     except Exception as exc:
-        logger.error("Failed to build the pairs round board: %s", exc)
+        logger.error("Failed to build the team board: %s", exc)
         return
 
     try:
@@ -119,25 +120,24 @@ async def run_pairs_round_board(
             text=f"{message}\n\n({start_date} – {end_date})",
         )
     except TelegramError as exc:
-        # Leave the round active so the next daily run retries it.
-        logger.error("Failed to send the pairs round board: %s", exc)
+        # Leave the round active so next Monday retries it.
+        logger.error("Failed to send the team board: %s", exc)
         return
 
     logger.info(
-        "Posted final pairs board for round %s (%s–%s).",
+        "Posted team board for round %s (%s–%s).",
         current["round_id"],
         start_date,
         end_date,
     )
 
-    # Close the round LAST: only a confirmed send may retire it.
     try:
-        await sheets.set_pairs_round_status(
-            current["round_id"], PAIRS_STATUS_POSTED
+        await sheets.set_team_round_status(
+            current["round_id"], TEAMS_STATUS_POSTED
         )
     except Exception as exc:
         logger.error(
-            "Pairs round %s posted but could not be marked posted: %s",
+            "Team round %s posted but could not be marked posted: %s",
             current["round_id"],
             exc,
         )
@@ -178,7 +178,7 @@ def build_scheduler(
     Args:
         bot: PTB bot instance used by jobs to send messages.
         leaderboard: Service for aggregating & formatting leaderboards.
-        sheets: Sheets service used by the pairs job to read the current round.
+        sheets: Sheets service used by the weekly job to read the team round.
         target_chat_id: Chat to post leaderboards to. If ``None``, the
             leaderboard jobs are not registered (see warning below).
         tz: IANA timezone name (e.g. ``Europe/Nicosia``).
@@ -187,9 +187,9 @@ def build_scheduler(
         A configured, not-yet-started scheduler.
 
     Note:
-        The pairs job is registered unconditionally but is a no-op unless a
-        coach-created round has finished (see :func:`run_pairs_round_board`);
-        pairs are no longer configured at deploy time.
+        The team board is not a separate job: it runs at the start of the
+        weekly job (see :func:`run_weekly_team_board`) and is a no-op unless a
+        coach-created round has finished.
     """
 
     zone = ZoneInfo(tz)
@@ -205,19 +205,9 @@ def build_scheduler(
         )
         return scheduler
 
-    # Pairs round board first (daily 09:00 — a no-op unless a coach-created
-    # round has ended), then the individual board (Mon 09:05). Each job is
-    # registered independently and swallows its own errors, so a failure in one
-    # can never stop the other from posting.
-    scheduler.add_job(
-        run_pairs_round_board,
-        CronTrigger(hour=9, minute=0, timezone=zone),
-        args=[bot, leaderboard, sheets, target_chat_id, tz],
-        id="pairs_round_board",
-        misfire_grace_time=3600,
-        coalesce=True,
-        replace_existing=True,
-    )
+    # The weekly job posts the TEAM board and then the individual board; the
+    # monthly job is independent. Each swallows its own errors, so a failure in
+    # one can never stop the other from posting.
     scheduler.add_job(
         run_weekly_leaderboard,
         CronTrigger(day_of_week="mon", hour=9, minute=5, timezone=zone),
@@ -238,9 +228,8 @@ def build_scheduler(
     )
 
     logger.info(
-        "Scheduler configured: pairs round board (daily 09:00, posts only when "
-        "a coach-created round has ended), weekly (Mon 09:05) & monthly "
-        "(1st 09:00) in %s.",
+        "Scheduler configured: weekly team + individual boards (Mon 09:05) & "
+        "monthly (1st 09:00) in %s.",
         tz,
     )
     return scheduler

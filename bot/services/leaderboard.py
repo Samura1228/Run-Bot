@@ -1,8 +1,8 @@
 """Leaderboard service.
 
 Aggregates points per user over a date range and formats weekly/monthly
-leaderboard messages, plus the weekly **pairs** board (two configured members
-competing on their combined weekly points).
+leaderboard messages, plus the weekly **team** board (coach-created teams
+competing on their members' combined weekly points).
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ import logging
 from datetime import date
 from typing import Any, Protocol, Sequence
 
-from bot.models import LeaderboardEntry, PairEntry
+from bot.models import LeaderboardEntry, TeamEntry
 from bot.services.sheets import SheetsService
 from bot.utils.points import format_points
 
@@ -24,7 +24,7 @@ class _Rankable(Protocol):
     """Minimal surface the shared renderer needs from a leaderboard row.
 
     Both :class:`~bot.models.LeaderboardEntry` (individual) and
-    :class:`~bot.models.PairEntry` (pairs) satisfy it, so the SAME ranking /
+    :class:`~bot.models.TeamEntry` (teams) satisfy it, so the SAME ranking /
     formatting code (including the "1224" tie logic) drives both boards.
     """
 
@@ -79,31 +79,31 @@ class LeaderboardService:
         entries.sort(key=lambda e: (-e.points, e.label().lower()))
         return entries
 
-    async def aggregate_pairs(
+    async def aggregate_teams(
         self,
-        pairs: Sequence[tuple[int, int]],
+        teams: Sequence[tuple[str, Sequence[int]]],
         start_date: date,
         end_date: date,
-    ) -> list[PairEntry]:
-        """Aggregate combined points per configured pair over a date range.
+    ) -> list[TeamEntry]:
+        """Aggregate combined points per team over a date range.
 
         Reuses :meth:`aggregate` verbatim (same ``read_rows_in_range`` data
-        path, same season cutoff, same stored point values — no extra
-        multipliers; legacy ``streak_bonus`` rows are excluded), then
-        simply sums the two configured members' totals. A member with no rows in
-        the range contributes ``0`` and never skips the pair.
+        path, same season cutoff, same coach exclusion, same stored point
+        values — no extra multipliers, legacy ``streak_bonus`` rows excluded),
+        then sums each team's members. A member with no rows in the range
+        contributes ``0`` and never drops the team.
 
-        Display labels reuse :meth:`LeaderboardEntry.label` so a member with no
-        ``telegram_username`` still renders by display name. If a member has no
-        rows at all in the range (so no name in the ``Log``), the label falls
-        back to their ``Plans`` ``@username`` if available, else ``user {id}``.
+        Note the sum is over whatever members the team actually has: with
+        equal-sized teams that ranks identically to a per-member average, but
+        an unequal team is advantaged — which is why :class:`TeamEntry` keeps
+        ``size`` so the rendered line can show it.
 
-        Returns the pairs sorted by combined points desc, then by the rendered
-        pair label (lowercased) for deterministic ordering within ties.
+        Returns teams sorted by points desc, then by name (lowercased) for a
+        deterministic order within ties.
         """
 
-        if not pairs:
-            logger.info("No pairs configured; skipping pairs aggregation.")
+        if not teams:
+            logger.info("No teams configured; skipping team aggregation.")
             return []
 
         entries = await self.aggregate(start_date, end_date)
@@ -111,48 +111,23 @@ class LeaderboardService:
             entry.telegram_user_id: entry for entry in entries
         }
 
-        # Only hit the Plans tab if some member is missing from the Log window.
-        missing = [
-            member_id
-            for pair in pairs
-            for member_id in pair
-            if member_id not in by_user
-        ]
-        plan_usernames: dict[int, str] = {}
-        if missing:
-            try:
-                plan_usernames = {
-                    row["user_id"]: (row.get("username") or "")
-                    for row in await self._sheets.list_plans()
-                }
-            except Exception as exc:  # noqa: BLE001 - labels must never crash
-                logger.warning(
-                    "Pairs: could not read Plans for display-name fallback: %s",
-                    exc,
-                )
-
-        pair_entries: list[PairEntry] = []
-        for member_a, member_b in pairs:
-            labels: list[str] = []
+        team_entries: list[TeamEntry] = []
+        for name, member_ids in teams:
             total = 0.0
-            for member_id in (member_a, member_b):
+            for member_id in member_ids:
                 entry = by_user.get(member_id)
                 if entry is not None:
                     total += entry.points
-                    labels.append(entry.label())
-                    continue
-                username = plan_usernames.get(member_id, "").strip().lstrip("@")
-                labels.append(f"@{username}" if username else f"user {member_id}")
-            pair_entries.append(
-                PairEntry(
-                    member_ids=(member_a, member_b),
-                    member_labels=(labels[0], labels[1]),
-                    points=total,
+            team_entries.append(
+                TeamEntry(
+                    name=name,
+                    member_ids=tuple(member_ids),
+                    points=round(total, 2),
                 )
             )
 
-        pair_entries.sort(key=lambda e: (-e.points, e.label().lower()))
-        return pair_entries
+        team_entries.sort(key=lambda e: (-e.points, e.label().lower()))
+        return team_entries
 
     @staticmethod
     def _format_ranking(entries: Sequence[_Rankable]) -> str:
@@ -217,30 +192,35 @@ class LeaderboardService:
             return f"{header}\n\nNo runs logged this month yet."
         return f"{header}\n\n{self._format_ranking(entries)}"
 
-    def format_pairs(
+    def format_teams(
         self,
-        entries: list[PairEntry],
+        entries: list[TeamEntry],
         start_date: date,
         end_date: date,
     ) -> str:
-        """Format the pairs leaderboard message for a round's date range.
+        """Format the team leaderboard for a round's Mon–Sun week.
 
         Uses the SAME renderer as the individual boards, so lines read
-        ``{A} ; {B}  - {points} points`` (two spaces before the hyphen) with
-        medals for ranks 1–3 and the "1224" standard competition ranking for
-        ties.
-
-        The header says "Weekly" only when the range really is 7 days, since a
-        coach-created round can be any length (see
-        :func:`bot.handlers.commands.setpairs_command`).
+        ``{team} ({size})  - {points} points`` (two spaces before the hyphen)
+        with medals for ranks 1–3 and the "1224" standard competition ranking
+        for ties. The size is rendered because the score is a SUM: with equal
+        teams it changes nothing, and with unequal ones it makes the advantage
+        visible instead of quietly unfair.
         """
 
-        days = (end_date - start_date).days + 1
-        header = (
-            "Weekly pairs leaders board 🏆"
-            if days == 7
-            else "Pairs leaders board 🏆"
-        )
+        header = "Weekly team leaders board 🏆"
         if not entries:
-            return f"{header}\n\nNo pairs configured."
-        return f"{header}\n\n{self._format_ranking(entries)}"
+            return f"{header}\n\nNo teams configured."
+
+        class _Sized:
+            """Render shim: same points, label carries the member count."""
+
+            def __init__(self, entry: TeamEntry) -> None:
+                self.points = entry.points
+                self._text = f"{entry.label()} ({entry.size})"
+
+            def label(self) -> str:
+                return self._text
+
+        rows = [_Sized(entry) for entry in entries]
+        return f"{header}\n\n{self._format_ranking(rows)}"

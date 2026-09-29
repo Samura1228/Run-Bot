@@ -18,11 +18,11 @@ from pydantic import BaseModel, Field, ValidationError, field_validator
 
 logger = logging.getLogger(__name__)
 
-# NOTE: competition pairs are no longer configured here. They are created by a
-# coach with ``/setpairs <duration> <pair>…``, stored as a time-boxed ROUND in
-# the ``Pairs`` worksheet, and tracked ONLY while that round is active. The
-# former ``PAIRS`` env var and its ``DEFAULT_PAIRS`` fallback were removed so an
-# old deploy-time list can never quietly resume being scored.
+# NOTE: competition teams are not configured here. A coach creates them with a
+# multi-line ``/team`` message; the round is stored in the ``Teams`` worksheet
+# and covers the current Mon-Sun week. The long-gone ``PAIRS`` env var and its
+# ``DEFAULT_PAIRS`` fallback were removed so an old deploy-time list can never
+# quietly resume being scored.
 
 
 class Settings(BaseModel):
@@ -53,7 +53,7 @@ class Settings(BaseModel):
     # Late-submission grace period: on MONDAY, until this hour (local time in
     # ``timezone``), a workout dated in the immediately-preceding Mon–Sun week is
     # still accepted and scored — because the weekly boards do not post until
-    # Mon 09:00 (pairs) / 09:05 (individual), so those points can still
+    # Mon 09:05 (team + individual boards), so those points can still
     # legitimately count. Sourced from the optional
     # ``LATE_SUBMISSION_GRACE_UNTIL_HOUR`` env var; defaults to 9 to match the
     # 09:00 board. Set to ``0`` to DISABLE the grace period (strict
@@ -63,29 +63,29 @@ class Settings(BaseModel):
     # Sourced from the optional ``COACH_IDS`` env var (comma-separated). Empty
     # set means no coaches configured (self-service still works for everyone).
     coach_ids: set[int] = Field(default_factory=set)
-    # Telegram user IDs allowed to manage the PAIRS competition (/setpairs,
-    # /pairs, /pairs stop) WITHOUT being a coach. Sourced from the optional
-    # ``PAIRS_ADMIN_IDS`` env var (comma-separated, same format as
+    # Telegram user IDs allowed to manage the TEAM competition (/team and
+    # /team stop) WITHOUT being a coach. Sourced from the optional
+    # ``TEAM_ADMIN_IDS`` env var (comma-separated, same format as
     # ``COACH_IDS``). This is deliberately a separate list from ``coach_ids``:
-    # it grants pairs management only and does NOT allow setting or viewing
-    # other members' plans via /setplan. Coaches always keep pairs access too.
-    pairs_admin_ids: set[int] = Field(default_factory=set)
+    # it grants team management only and does NOT allow setting or viewing
+    # other members' plans via /setplan. Coaches always keep team access too.
+    team_admin_ids: set[int] = Field(default_factory=set)
 
     def is_coach(self, user_id: int) -> bool:
         """Return True if the given Telegram user id is a configured coach."""
 
         return user_id in self.coach_ids
 
-    def can_manage_pairs(self, user_id: int) -> bool:
-        """Return True if the user may run /setpairs and /pairs.
+    def can_manage_teams(self, user_id: int) -> bool:
+        """Return True if the user may run /team and /team stop.
 
-        True for any configured coach OR anyone listed in ``PAIRS_ADMIN_IDS``.
-        Pairs admins are a strictly narrower role than coaches: they can start,
-        view and stop pairs rounds, but :meth:`is_coach` still gates /setplan,
+        True for any configured coach OR anyone listed in ``TEAM_ADMIN_IDS``.
+        Team admins are a strictly narrower role than coaches: they can create,
+        view and stop team rounds, but :meth:`is_coach` still gates /setplan,
         so they cannot change anyone's training plan.
         """
 
-        return self.is_coach(user_id) or user_id in self.pairs_admin_ids
+        return self.is_coach(user_id) or user_id in self.team_admin_ids
 
     @field_validator("log_level")
     @classmethod
@@ -167,7 +167,7 @@ def _parse_late_submission_grace_until_hour(raw: Optional[str]) -> Optional[int]
 def _parse_user_ids(raw: Optional[str], var_name: str) -> set[int]:
     """Parse a comma-separated Telegram-user-ID env var into a set of ints.
 
-    Shared by ``COACH_IDS`` and ``PAIRS_ADMIN_IDS``, which use the same format
+    Shared by ``COACH_IDS`` and ``TEAM_ADMIN_IDS``, which use the same format
     (e.g. ``123,456``). Whitespace and blank entries are ignored. Non-integer
     entries are skipped with a logged warning (rather than raising) so a typo
     never blocks boot. A blank/unset value yields an empty set.
@@ -238,10 +238,10 @@ def load_settings() -> Settings:
     # COACH_IDS is optional: blank/unset → no coaches. Non-integer entries are
     # skipped with a warning (never a boot failure).
     coach_ids = _parse_user_ids(os.environ.get("COACH_IDS"), "COACH_IDS")
-    # PAIRS_ADMIN_IDS is optional and independent of COACH_IDS: it grants the
-    # pairs commands to people who are NOT coaches. Blank/unset → coaches only.
-    pairs_admin_ids = _parse_user_ids(
-        os.environ.get("PAIRS_ADMIN_IDS"), "PAIRS_ADMIN_IDS"
+    # TEAM_ADMIN_IDS is optional and independent of COACH_IDS: it grants the
+    # team commands to people who are NOT coaches. Blank/unset → coaches only.
+    team_admin_ids = _parse_user_ids(
+        os.environ.get("TEAM_ADMIN_IDS"), "TEAM_ADMIN_IDS"
     )
 
     kwargs: dict[str, Any] = {
@@ -251,7 +251,7 @@ def load_settings() -> Settings:
         "google_sheet_id": google_sheet_id,
         "target_chat_id": target_chat_id,
         "coach_ids": coach_ids,
-        "pairs_admin_ids": pairs_admin_ids,
+        "team_admin_ids": team_admin_ids,
     }
 
     # Optional overrides.
@@ -300,13 +300,13 @@ def load_settings() -> Settings:
                 "LATE_SUBMISSION_GRACE_UNTIL_HOUR is 0 — previous-week "
                 "submissions are rejected as soon as the week rolls over."
             )
-    # The legacy PAIRS env var is no longer used: pairs are created per ROUND by
-    # a coach via /setpairs and stored in the Pairs worksheet. Warn once if it is
+    # The legacy PAIRS env var is long gone: teams are created per ROUND by a
+    # coach via /team and stored in the Teams worksheet. Warn once if it is
     # still set on the deployment so the operator knows it now does nothing.
     if os.environ.get("PAIRS"):
         logger.warning(
-            "PAIRS is set but no longer used — pairs are now created with "
-            "/setpairs and last only for the duration the coach specifies. "
+            "PAIRS is set but no longer used — teams are now created with "
+            "a multi-line /team message and last for the current week. "
             "You can safely delete the PAIRS variable."
         )
 

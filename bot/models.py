@@ -3,8 +3,8 @@
 - :class:`VisionVerdict` — the strict JSON schema Claude must return.
 - :class:`WorkoutLogRow` — a single confirmed & awarded workout row.
 - :class:`LeaderboardEntry` — an aggregated per-user leaderboard entry.
-- :class:`PairEntry` — an aggregated per-PAIR leaderboard entry (combined
-  points of two configured members).
+- :class:`TeamEntry` — an aggregated per-TEAM leaderboard entry (combined
+  points of every member of a coach-created team).
 """
 
 from __future__ import annotations
@@ -191,22 +191,31 @@ class LeaderboardEntry(BaseModel):
         return f"user {self.telegram_user_id}"
 
 
-class PairEntry(BaseModel):
-    """An aggregated entry for one configured PAIR over a date range.
+class TeamEntry(BaseModel):
+    """An aggregated entry for one TEAM over a date range.
 
-    ``points`` is the SUM of both members' points for the range (a member with
-    no rows contributes 0). ``member_labels`` preserves the configured
-    Member A → Member B order and holds each member's already-resolved display
-    label, so :meth:`label` never has to touch the sheet. It exposes the same
-    ``label()`` / ``points`` surface as :class:`LeaderboardEntry` so the shared
-    leaderboard renderer (including the "1224" tie ranking) works unchanged.
+    ``points`` is the SUM of every member's points for the range (a member with
+    no rows contributes 0), which is the honest reading of "the team's points"
+    and matches ranking-by-average whenever teams are the same size. ``size``
+    is carried so the rendered line can show it — with unequal teams the sum
+    favours the bigger one, and the reader should be able to see that.
+
+    Exposes the same ``label()`` / ``points`` surface as
+    :class:`LeaderboardEntry`, so the shared leaderboard renderer (including
+    the "1224" tie ranking) works unchanged.
     """
 
-    member_ids: tuple[int, int]
-    member_labels: tuple[str, str]
+    name: str
+    member_ids: tuple[int, ...]
     points: float
 
-    def label(self) -> str:
-        """Return ``"Member A ; Member B"`` in the configured member order."""
+    @property
+    def size(self) -> int:
+        """Number of members on the team."""
 
-        return " ; ".join(self.member_labels)
+        return len(self.member_ids)
+
+    def label(self) -> str:
+        """Return the team name exactly as the coach wrote it."""
+
+        return self.name

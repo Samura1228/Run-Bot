@@ -17,7 +17,7 @@
 2. On any **photo** message, downloads the image, hashes the raw bytes (dedup), and sends it to **Claude vision**.
 3. Claude returns a **strict JSON verdict** (is it a supported — Garmin **or** WHOOP — workout screenshot, completed, with a workout date, etc.).
 4. The bot applies **points/date-window logic**: if the workout date falls in the **accepted window** — the **current Mon–Sun week** (Europe/Nicosia), extended over the **just-finished** week while it is Monday before the `LATE_SUBMISSION_GRACE_UNTIL_HOUR` cutoff (default **09:00**, i.e. before the weekly boards post) → award points and log to Google Sheets (row written first, then an INFO log line), then reply in chat. A late-but-accepted row keeps its **real `workout_date`**, so it counts toward the week being reported. **Running** uses the user's **weekly plan** (see Section 5) and replies `✅ Nice run, {name}! +{points} points. //total week = {total} points`. **Walking/cycling/strength** award a flat **5 points** once their minimum duration is met and reply `✅ Nice {walk|ride|strength session}, {name}! +5 points. //total week = {total} points`; below their minimum duration the bot replies with a short warning and awards nothing. A photo that is **NOT a supported tracker screenshot at all** (nature photo, meme, another app) is ignored in **complete silence** so the group is never spammed; a photo that IS a tracker screenshot but earns nothing still gets a short explanatory reply (see Section 5).
-5. An **APScheduler** (AsyncIOScheduler, timezone `Europe/Nicosia`) runs on the same event loop and posts a **weekly pairs leaderboard** (Monday 09:00), a **weekly individual leaderboard** (Monday 09:05) and a **monthly leaderboard** (1st of month 09:00). Both weekly jobs perform the (idempotent) **streak rollover** first, so streak bonuses are included in whichever board posts first.
+5. An **APScheduler** (AsyncIOScheduler, timezone `Europe/Nicosia`) runs on the same event loop and posts the **weekly boards** on Monday 09:05 — the coach-created **team board** followed by the **individual leaderboard** — plus a **monthly leaderboard** (1st of month 09:00).
 6. **Google Sheets is the single source of truth.** Leaderboards are computed by reading and aggregating the sheet, so restarts lose no data.
 
 ### Component Diagram
@@ -76,7 +76,7 @@ run-bot/
 │   ├── __init__.py
 │   ├── main.py                  # Entry point: build Application, register handlers, start scheduler, run polling
 │   ├── config.py                # Loads & validates env vars into a typed Settings object
-│   ├── models.py                # Dataclasses/Pydantic models: VisionVerdict, WorkoutLogRow, LeaderboardEntry, PairEntry
+│   ├── models.py                # Dataclasses/Pydantic models: VisionVerdict, WorkoutLogRow, LeaderboardEntry, TeamEntry
 │   ├── handlers/
 │   │   ├── __init__.py
 │   │   └── photo.py             # PhotoHandler: orchestrates download → hash → dedup → vision → decision → log/reply
@@ -104,7 +104,7 @@ run-bot/
 |---|---|
 | [`bot/main.py`](bot/main.py) | Application entry point; wires config, services, handlers, scheduler; starts long-polling. |
 | [`bot/config.py`](bot/config.py) | Read & validate all environment variables; expose a typed `Settings` singleton. |
-| [`bot/models.py`](bot/models.py) | Typed data models: `VisionVerdict`, `WorkoutLogRow`, `LeaderboardEntry`, `PairEntry` (a pair's combined total + both member labels). |
+| [`bot/models.py`](bot/models.py) | Typed data models: `VisionVerdict`, `WorkoutLogRow`, `LeaderboardEntry`, `TeamEntry` (a pair's combined total + both member labels). |
 | [`bot/handlers/photo.py`](bot/handlers/photo.py) | End-to-end photo pipeline orchestration; writes to the Sheet first, then replies `✅ Nice run, {name}! +{points} points. //total week = {total} points`. |
 | [`bot/services/vision.py`](bot/services/vision.py) | Call Claude vision; enforce strict JSON schema; return validated `VisionVerdict`. |
 | [`bot/services/sheets.py`](bot/services/sheets.py) | All Google Sheets I/O: dedup lookup, append row, read range for aggregation. |
@@ -396,7 +396,7 @@ If gated-in, proceed to the date-window/points decision (Section 5). Otherwise I
 
 ### Late-submission grace period (accepted window ⊇ current week)
 
-The weekly boards do not post until **Mon 09:00** (pairs) / **09:05** (individual), so a workout finished on Sunday but posted a few minutes after midnight can still legitimately count toward the week being reported. Previously the handler compared the workout date against `current_week_bounds()` alone and rejected such a submission the instant the week rolled over — **silently**, producing the production log line `Workout date 2026-08-09 is outside current week (2026-08-10—2026-08-16); ignoring.`
+The weekly boards do not post until **Mon 09:05**, so a workout finished on Sunday but posted a few minutes after midnight can still legitimately count toward the week being reported. Previously the handler compared the workout date against `current_week_bounds()` alone and rejected such a submission the instant the week rolled over — **silently**, producing the production log line `Workout date 2026-08-09 is outside current week (2026-08-10—2026-08-16); ignoring.`
 
 The date check therefore uses an **accepted window** rather than the bare current week, computed by `accepted_workout_window(tz, grace_until_hour, now=<message timestamp>)` in [`bot/utils/dates.py`](bot/utils/dates.py):
 
@@ -639,38 +639,23 @@ Historical `streak_bonus` rows are **left in the sheet** as a record but are **s
 
 | Job | Trigger | Fires | Action |
 |-----|---------|-------|--------|
-| Weekly **pairs** leaderboard | `CronTrigger(day_of_week="mon", hour=9, minute=0, timezone=tz)` | Monday 09:00 | Post ranked **combined** totals per configured pair for the **previous** Mon–Sun week. Not registered when `PAIRS` is empty. |
-| Weekly individual leaderboard | `CronTrigger(day_of_week="mon", hour=9, minute=5, timezone=tz)` | Monday 09:05 | Post ranked individual totals for the **previous** Mon–Sun week. |
+| Weekly individual leaderboard | `CronTrigger(day_of_week="mon", hour=9, minute=5, timezone=tz)` | Monday 09:05 | Post the **team board** (no-op without an active round), then ranked individual totals for the **previous** Mon–Sun week. |
 | Monthly leaderboard | `CronTrigger(day=1, hour=9, minute=0, timezone=tz)` | 1st of month 09:00 | Post ranked totals for the **previous** full calendar month. |
 
-**Failure isolation.** The two weekly jobs are registered **independently** and each swallows/logs its own exceptions, so a failure in the pairs board can never prevent the individual board from posting, and vice versa.
+**Failure isolation.** The team board runs at the start of the weekly job and swallows/logs its own exceptions, so a failure there can never prevent the individual board from posting. The weekly and monthly jobs are registered independently for the same reason.
 
 ### Setup Pseudocode ([`bot/services/scheduler.py`](bot/services/scheduler.py))
 
 ```
-def build_scheduler(bot, sheets, leaderboard, target_chat_id, tz, pairs):
-    scheduler = AsyncIOScheduler(timezone=tz)
-
-    if pairs:   # empty PAIRS → pairs board disabled, job not registered
-        scheduler.add_job(
-            run_weekly_pairs_leaderboard,
-            CronTrigger(day_of_week="mon", hour=9, minute=0, timezone=tz),
-            args=[bot, leaderboard, sheets, list(pairs), target_chat_id, tz],
-            id="weekly_pairs_leaderboard", misfire_grace_time=3600, coalesce=True,
-        )
+def build_scheduler(bot, sheets, leaderboard, target_chat_id, tz):
+    ...
     scheduler.add_job(
-        run_weekly_leaderboard,
+        run_weekly_leaderboard,          # posts the TEAM board, then the individual one
         CronTrigger(day_of_week="mon", hour=9, minute=5, timezone=tz),
-        args=[bot, sheets, leaderboard, target_chat_id],
+        args=[bot, leaderboard, sheets, target_chat_id, tz],
         id="weekly_leaderboard", misfire_grace_time=3600, coalesce=True,
+        replace_existing=True,
     )
-    scheduler.add_job(
-        run_monthly_leaderboard,
-        CronTrigger(day=1, hour=9, minute=0, timezone=tz),
-        args=[bot, sheets, leaderboard, target_chat_id],
-        id="monthly_leaderboard", misfire_grace_time=3600, coalesce=True,
-    )
-    return scheduler
 ```
 
 - `misfire_grace_time` and `coalesce=True` protect against restarts near the fire time.
@@ -741,29 +726,28 @@ Sam  - 20 points
 - Display name preference: `display_name` if present, else `@username`, else `user {id}`.
 - If there are **no entries** in the range, post a friendly empty-state message under the same header (`Weekly leaders board 🏆\n\nNo runs logged this week yet.` / `Monthly leaders board 🏆\n\nNo runs logged this month yet.`); it still posts so the group knows the bot is alive.
 
-### Pairs Aggregation (`LeaderboardService.aggregate_pairs()`)
+### Team Aggregation (`LeaderboardService.aggregate_teams()`)
 
-The coach pairs up chat members (see `PAIRS` in Section 8); each pair competes on the **combined** weekly points of its two members.
+A coach sets up the week's teams with a multi-line `/team` message (Section 8); each team competes on its members' **combined** weekly points.
 
-1. Call `aggregate(start, end)` **verbatim** — the same `read_rows_in_range()` data path, the same `SEASON_START_DATE` cutoff, the same **already-stored** point values. There is **no re-implementation of the point math and no pair multiplier**: running still yields more (15 / 10 / 7.5) than the flat 5 for walking/cycling/strength, and `streak_bonus` rows count as normal points.
-2. Index the resulting `LeaderboardEntry` list by `telegram_user_id`, then, for each configured `(member_a, member_b)` tuple, sum the two members' `points` into a `PairEntry`. A member with **no rows** in the window contributes **0** — the pair is never skipped and nothing crashes.
-3. **Labels** reuse `LeaderboardEntry.label()` (name → `@username` → `user {id}`), so a member without a `telegram_username` (e.g. *Elena*) still renders by display name. If a member has no rows at all in the window (so no name in the `Log`), the label falls back to their `Plans` `@username` when available, else `user {id}`; the `Plans` read is only attempted when some member is missing and its failure is logged, never raised.
-4. Sort by combined points **descending**, tie-broken by the rendered pair label lowercased (deterministic ordering within ties).
-5. Render with the **same** `_format_ranking()` used by the individual boards, so the `{label}  - {points} points {medal}` layout, the `format_points()` trimming (`140`, `7.5`) and the **"1224" standard competition ranking** (tied pairs share a rank/medal, the next rank is skipped) are identical by construction. `PairEntry.label()` joins the two member labels in the **configured order** with `` ; `` (space, semicolon, space).
+1. Call `aggregate(start, end)` **verbatim** — the same `read_rows_in_range()` data path, the same `SEASON_START_DATE` cutoff, the same coach exclusion, the same legacy-`streak_bonus` exclusion, and the same already-stored point values. There are no team multipliers.
+2. Index the resulting `LeaderboardEntry` list by `telegram_user_id`, then sum each team's members. A member with no rows in the range contributes `0` and never drops the team.
+3. Sort by points **descending**, tie-broken by the team name lowercased (deterministic ordering within a tie).
+4. Render with the **same** `_format_ranking()` used by the individual boards, so the `{label}  - {points} points` layout, the medals and the "1224" tie ranking are identical. `format_teams()` wraps each entry in a small render shim whose label carries the member count, giving `Team 1 (5)  - 30 points 🥇`.
 
-Both `LeaderboardEntry` and `PairEntry` satisfy the small `_Rankable` protocol (`points` + `label()`), which is how one renderer serves both boards without duplicated ranking logic.
+Both `LeaderboardEntry` and `TeamEntry` satisfy the small `_Rankable` protocol (`points` + `label()`), which is what lets one renderer drive both boards.
 
-**Pairs:**
+**Why the size is shown:** a team's score is a SUM. With equal-sized teams that ranks identically to a per-member average; with unequal teams the bigger one is advantaged, and printing the size makes that visible rather than quietly unfair.
+
+**Teams:**
 ```
-Weekly pairs leaders board 🏆
+Weekly team leaders board 🏆
 
-ArtLike_ ; MY  - 140 points 🥇
-. ; Anastasia S  - 115 points 🥈
-Матвѣй ; Marfa Sh  - 110 points 🥉
-AB ; Elena  - 70 points
+Team 2 (5)  - 140 points 🥇
+Team 1 (5)  - 115 points 🥈
 ```
 
-An empty `PAIRS` yields no entries and the job is not registered at all (nothing is posted). On demand, the coach-only **`/pairs`** command renders the same board for the **current** (in-progress) Mon–Sun week via `current_week_bounds()`.
+With no active round `aggregate_teams()` returns no entries and nothing is posted. On demand, `/team` renders the same board over the round's own window.
 
 ---
 
@@ -782,9 +766,9 @@ An empty `PAIRS` yields no entries and the job is not registered at all (nothing
 | `POINTS_PER_RUN` | no | Legacy gate value (default `10`). Under the plan-based model this no longer sets the per-workout points — it only ensures `running` is an awardable activity type; actual points come from `workout_points()` (see Section 5). |
 | `SEASON_START_DATE` | no | ISO date `YYYY-MM-DD` (default `2026-07-12`). Points and the leaderboard count **only** submissions dated **on or after** this date; earlier submissions are ignored so the season restarts everyone at zero without deleting registrations or coach-assigned plans (see Section 5). Parsed into `Settings.season_start_date` (a `datetime.date`); an invalid value fails fast at startup. |
 | `LATE_SUBMISSION_GRACE_UNTIL_HOUR` | no | Integer hour `0`–`23` (default `9`). The **Monday** hour (local `TIMEZONE`) until which a workout dated in the **just-finished** Mon–Sun week is still accepted and scored — the default `9` matches the Mon 09:00/09:05 leaderboards. The row keeps its **real** `workout_date`, so it counts toward the week being reported (see Section 5). Set to `0` to **disable** the grace period (strict current-week-only). Parsed into `Settings.late_submission_grace_until_hour`; a non-integer or out-of-range value raises `ConfigError` at startup, like `SEASON_START_DATE`. |
-| `COACH_IDS` | no | Comma-separated Telegram user IDs (e.g. `123,456`) of the coaches — allowed to run `/setplan` and manage pairs. **Coaches never score.** The set is passed to `SheetsService(excluded_user_ids=…)`, where — exactly like the `SEASON_START_DATE` cutoff — it is applied by every aggregation read (`read_rows_in_range`, `count_user_workouts_in_week`, `sum_user_points_in_range`), so a coach's rows never reach a leaderboard, a pair total or the streak rollover, without deleting anything. The photo handler additionally drops a coach's photo before the download and vision call. Blank/unset → empty set. Non-integer entries are **skipped with a logged warning**. Exposed via `Settings.coach_ids` / `Settings.is_coach(user_id)`. |
-| `PAIRS_ADMIN_IDS` | no | Comma-separated Telegram user IDs (e.g. `123,456`) allowed to manage the **pairs competition** — `/setpairs`, `/pairs`, `/pairs stop` — **without being a coach**. Deliberately a separate, narrower list than `COACH_IDS`: a pairs admin **cannot** run `/setplan` or view another member's plan. Coaches always retain pairs access. Blank/unset → empty set (only coaches manage pairs). Parsed by the same `_parse_user_ids` helper as `COACH_IDS`, so non-integer entries are **skipped with a logged warning** (never a boot failure). Exposed via `Settings.pairs_admin_ids` and the `Settings.can_manage_pairs(user_id)` helper. |
-| ~~`PAIRS`~~ | — | **Removed.** Pairs are no longer configured at deploy time; a coach or pairs admin creates a time-boxed round with `/setpairs` instead (Section 7). A still-set `PAIRS` is ignored and logs a startup warning. |
+| `COACH_IDS` | no | Comma-separated Telegram user IDs (e.g. `123,456`) of the coaches — allowed to run `/setplan` and manage teams. **Coaches never score.** The set is passed to `SheetsService(excluded_user_ids=…)`, where — exactly like the `SEASON_START_DATE` cutoff — it is applied by every aggregation read (`read_rows_in_range`, `count_user_workouts_in_week`, `sum_user_points_in_range`), so a coach's rows never reach a leaderboard, a pair total or the streak rollover, without deleting anything. The photo handler additionally drops a coach's photo before the download and vision call. Blank/unset → empty set. Non-integer entries are **skipped with a logged warning**. Exposed via `Settings.coach_ids` / `Settings.is_coach(user_id)`. |
+| `TEAM_ADMIN_IDS` | no | Comma-separated Telegram user IDs (e.g. `123,456`) allowed to manage the **team competition** — `/team` and `/team stop` — **without being a coach**. Deliberately a separate, narrower list than `COACH_IDS`: a team admin **cannot** run `/setplan` or view another member's plan. Coaches always retain team access. Blank/unset → empty set (only coaches manage teams). Parsed by the same `_parse_user_ids` helper as `COACH_IDS`, so non-integer entries are **skipped with a logged warning** (never a boot failure). Exposed via `Settings.team_admin_ids` and the `Settings.can_manage_teams(user_id)` helper. |
+| ~~`PAIRS`~~ | — | **Removed.** Teams are not configured at deploy time; a coach or team admin creates them with a multi-line `/team` message, stored in the `Teams` worksheet for the current Mon–Sun week. A still-set `PAIRS` is ignored and logs a startup warning. |
 | `LOG_LEVEL` | no | Logging verbosity (default `INFO`). |
 
 **Validation:** [`bot/config.py`](bot/config.py) fails fast at startup if any required variable is missing or malformed (e.g. `GOOGLE_SERVICE_ACCOUNT_JSON` not valid JSON, `TARGET_CHAT_ID` not an int).
@@ -797,7 +781,7 @@ An empty `PAIRS` yields no entries and the job is not registered at all (nothing
 | `/myplan` | Reply with the caller's own plan (defaults to plan 3 if unset). |
 | `/myplan @user` | **Coach-only.** View another member's plan by `@username` or by **replying** to their message. Shows defaults (plan 3 / streak 0) with a `(no plan set yet, using default 3)` note if they have no row. Same permission/not-found messages as coach `/setplan`. |
 | `/whoami` | Reply with the caller's Telegram id + name (id in `<code>` monospace for easy copy). Used as a **reply** to another user's message, reports THAT user's id + name instead — the primary way coaches discover member IDs (for `COACH_IDS` and username resolution). |
-| `/pairs` | **Coach-only** (same `Settings.is_coach()` check as `/setplan`; non-coaches get `Only a coach can view the pairs leaderboard.`). Replies with the **current** week's pairs board via `current_week_bounds()`, reusing `aggregate_pairs()` + `format_pairs()` — the same code the Monday 09:00 job uses. The optional argument **`last`** (aliases `prev`/`previous`, case-insensitive) switches to `previous_week_bounds()` — the exact window the scheduled Monday 09:00 board reports — and appends the window (e.g. `(2026-08-03 – 2026-08-09)`) so a re-posted previous-week board can't be mistaken for the current one; any other argument falls back to the current week. Useful after a late submission is accepted under the grace period (Section 5), since such a row keeps its real `workout_date` and belongs to the previous week. Replies `No pairs configured (the PAIRS setting is empty).` when `PAIRS` is empty. Registered in [`bot/main.py`](bot/main.py) but intentionally **omitted from `setMyCommands`** (unadvertised, like `/setplan`). |
+| `/team` | **Coaches & `TEAM_ADMIN_IDS`** (`Settings.can_manage_teams()`; anyone else gets `Only a coach or the team organiser can manage the team leaderboard.`). A **multi-line** message sets up the week's teams: a team name per line followed by its members, resolved through the hand-maintained `Members` tab. PTB only exposes the first line as `context.args`, so the handler reads `message.text` itself. The round covers the current Mon–Sun week (`current_week_bounds()`) and is stored in the `Teams` worksheet as `Name=id,id|Name=id,id`. **Nothing is saved** unless every name resolves and nobody is on two teams — a misspelling surfaces as a team with no members and the whole message is rejected. Sending a new line-up cancels the active round first. Bare `/team` renders live standings via `aggregate_teams()`; `/team stop` (`cancel`/`end`) cancels the round with no board posted. |
 | `/status` | Consolidated health report (Telegram, Anthropic, Google Sheets, target chat, timezone). |
 | `/testsheet` | Verify Google Sheets connectivity and Editor access. |
 | `/chatid` | Reply with the current chat's ID for `TARGET_CHAT_ID`. |

@@ -33,7 +33,7 @@ whenever someone posts a **photo**, it:
    before 09:00** (the [late-submission grace
    period](#late-submission-grace-period)), since the weekly boards haven't
    posted yet.
-4. Automatically posts a **weekly pairs leaderboard** every Monday at 09:00, the
+4. Automatically posts a **weekly team leaderboard** every Monday at 09:05, the
    **weekly individual leaderboard** every Monday at 09:05, and a **monthly
    leaderboard** on the 1st of each month at 09:00 (Europe/Nicosia). Both weekly
 
@@ -342,12 +342,11 @@ Run Bot uses **long-polling**, so it runs as a **worker** (no HTTP port).
 ## How the leaderboards work
 
 - Times are in **Europe/Nicosia** (Cyprus). Change with `TIMEZONE` if needed.
-- **Pairs round board (daily 09:00 check):** posts each pair's **combined**
-  points — but **only** on the morning after a coach-created round has ended
-  (see [Pairs leaderboard](#pairs-leaderboard) below). A round finishing Sunday
-  is reported Monday 09:00. With no active round, nothing is posted at all.
-- **Weekly individual (Mon 09:05):** posts individual totals for the
-  **previous** Monday–Sunday week.
+- **Weekly (Mon 09:05):** two posts, back to back — first the **team board**
+  with each team's combined points (only when a coach-created round covered the
+  finished week; see [Team leaderboard](#team-leaderboard) below), then the
+  **individual** totals for the previous Monday–Sunday week. With no active
+  round only the individual board posts.
 - **Monthly (1st 09:00):** posts totals for the **previous** full calendar month.
 - Rankings sum each user's points over the range (**including** the
   walking/cycling/strength bonus points; legacy `streak_bonus` rows are
@@ -366,7 +365,7 @@ Run Bot uses **long-polling**, so it runs as a **worker** (no HTTP port).
 
 ### Late-submission grace period
 
-The weekly boards don't post until **Monday 09:00** (pairs) / **09:05**
+The weekly boards don't post until **Monday 09:05**
 (individual), so a workout finished on Sunday but posted a few minutes after
 midnight can still legitimately count. Previously such a submission was rejected
 the instant the week rolled over — and rejected **silently**.
@@ -407,91 +406,125 @@ Alex  - 40 points 🥉
 Sam  - 20 points
 ```
 
-### Pairs leaderboard
+### Team leaderboard
 
-Pairs run as **time-boxed rounds** that a coach starts on demand. A round has an
-explicit start and end date; the bot counts those pairs' **combined** points
-**only while the round is running**. When it ends, the final board is posted and
-the bot **stops tracking pairs entirely** until the coach starts a new round.
+Teams run as **weekly rounds** that a coach sets up on demand. A round covers
+the current **Mon–Sun** week; the bot counts each team's **combined** points
+only while it is running. On Monday the board is posted and the bot **stops
+tracking teams** until the coach sets up new ones.
 
-> **Nothing is tracked by default.** If no round is active there is no pairs
-> board, no scheduled post and no calculation — the feature is opt-in per round.
+> **Nothing is tracked by default.** With no active round there is no team
+> board, no scheduled post and no calculation — it is opt-in per week.
 
-#### Starting a round
+#### The `Members` tab (do this first)
+
+The coach writes people's **names**, not usernames, so the bot needs a
+directory. On first start it creates an empty **`Members` tab** in your Google
+Sheet with three columns — **you fill it in by hand**:
+
+| name | username | telegram_id |
+|------|----------|-------------|
+| Alexey B | artquite | 5025515480 |
+| Elena |  | 6108222286 |
+
+- **`name`** — exactly how the coach writes it in `/team`. Matching ignores case
+  and extra spaces, so `alexey  b` finds `Alexey B`. `Alexey B` and `Alexey V`
+  stay distinct.
+- **`telegram_id`** is required (use `/whoami`, replying to the person's
+  message). A row without a usable ID is skipped.
+- **`username`** is optional; when filled, the coach may write either the name
+  or the username.
+
+The bot **never writes to this tab** — add people, fix spellings and rename
+freely without a deploy.
+
+#### Setting up the week's teams
+
+One message: a team name on its own line, then its members, repeated.
 
 ```
-/setpairs 1w @artquite+@MaksYezhovv @Mak1225+@Elena
+/team
+Team 1
+Alexey B
+Elena
+Artem
+Ivan
+Maks
+Team 2
+Marfa
+Anastacia S
+Mathew
+Miron
+Alexey V
 ```
 
-- **First argument = how long it lasts:** `1w`, `2w`, `10d`, `3 days`… (1–365
-  days). `1w` = **7 whole days**.
-- **Each remaining argument = one pair**, two people joined by `+`. Members can
-  be `@username` (resolved from the sheet — they must have posted at least once,
-  or use `/whoami`) or a raw numeric ID.
-- The round **starts today** and counts **whole calendar days**, because
-  workouts are stored with a date and no time. Starting `1w` on Monday 7 Sep
-  counts workouts dated **7–13 Sep inclusive**.
-- The bot confirms with the exact window and when the final board will post:
+Any number of teams, any size — 2×5, 5×2, 3+4+3. The rule is simple: **a line
+that matches someone in `Members` is a member; any other line starts a new
+team**. Team names are free — `Team 1`, `Красные`, whatever.
 
-  ```
-  ✅ Pairs round created — 2 pairs, 7 days.
-  Counting workouts dated 2026-09-07 – 2026-09-13 (inclusive).
-  Final board posts 2026-09-14 at 09:00.
-  ```
+The bot confirms:
 
-Coach-only. Validation is strict and **nothing is saved** unless everything is
-valid: an unknown `@username`, a pair that isn't exactly two people, someone
-paired with themselves, or the same person in two pairs are all rejected with a
-clear explanation.
+```
+✅ Teams set for 2026-09-28 – 2026-10-04:
+
+Team 1 (5)
+Team 2 (5)
+
+The board posts Monday 09:05.
+```
+
+**Nothing is saved unless everything resolves.** A misspelled name shows up as
+a team with nobody under it, and the bot refuses the whole message rather than
+quietly dropping someone:
+
+```
+⚠️ Nothing saved — fix this and send /team again:
+
+• I don't know these names (or the team under them was empty): Elenaa
+
+• These people are on more than one team: Alexey B (Team 1)
+```
 
 #### While a round is running
 
-- **`/pairs`** — live standings for the round's own window, plus its dates and
-  whether it's still in progress. With no active round it says so and points you
-  at `/setpairs`.
-- **`/pairs stop`** — end the round immediately. No final board is posted and
-  nothing is tracked afterwards. (`cancel`/`end` also work.)
+- **`/team`** on its own — live standings plus the round's dates.
+- **`/team stop`** — cancel immediately. No board is posted and nothing is
+  tracked afterwards. (`cancel`/`end` also work.)
 
-#### When a round ends
+Sending a new `/team` line-up **replaces** the active round, so only one
+competition runs at a time. Rounds live in the **`Teams` tab** and survive
+restarts; old rounds are kept for history, never deleted.
 
-At **09:00 on the day after the end date** the bot posts the final board with
-the round's dates, then marks the round finished. A round ending Sunday is
-therefore reported **Monday 09:00**, exactly as before. The board is posted
-**once** — a restart or scheduler misfire can't duplicate or lose it, and if the
-send fails it retries the next morning.
+Coaches can always do this; so can anyone in `TEAM_ADMIN_IDS`.
 
-Running `/setpairs` again **replaces** any active round (the old one is
-cancelled), so only one competition ever runs at a time. Rounds are stored in a
-**`Pairs` tab** in your Google Sheet, so they survive restarts and redeploys; old
-rounds are kept for history, never deleted.
+#### When the week ends
 
-> **The `PAIRS` environment variable is no longer used.** Pairs are created with
-> `/setpairs` instead. If it's still set, the bot logs a warning at startup and
-> ignores it — you can safely delete the variable.
-#### Scoring (unchanged)
+On **Monday 09:05** the team board posts **just above** the individual
+leaderboard, then the round is marked finished. It posts **once** — a restart or
+misfire can't duplicate it — and if the send fails it retries the next Monday.
 
-- **Scoring reuses the individual board's aggregation** — the same round window,
-  the same `SEASON_START_DATE` cutoff, and the same **already-stored** point
-  values. There are **no pair multipliers**: running still yields more than the
-  flat 5 for walking/cycling/strength; legacy `streak_bonus` rows are skipped
-  points. A pair's total is simply the **sum of both members'** points; a member
-  with no workouts in the round contributes **0** (the pair is never skipped).
-- **Members render in the configured order**, `Member A ; Member B`, using the
-  same labels as the individual board (full name, else `@username`, else
-  `user <id>`) — so a member without a Telegram username still shows by name.
-- **Sorted by combined points high→low**, with 🥇🥈🥉 and the same **"1224"
-  standard competition ranking**: tied pairs share a rank/medal and the next
-  rank is skipped.
+#### Scoring
+
+- **Reuses the individual board's aggregation** — same week, same
+  `SEASON_START_DATE` cutoff, same coach exclusion, same already-stored point
+  values. There are **no team multipliers**: running still yields more than the
+  flat 5 for walking/cycling/strength, and legacy `streak_bonus` rows are
+  skipped.
+- A team's total is the **sum of its members'** points; someone with no
+  workouts contributes **0** and never drops the team.
+- Each line shows the **team size in brackets**. With equal teams that changes
+  nothing; if you ever run unequal teams, the sum favours the bigger one and
+  the bracket makes that visible.
+- **Sorted high→low** with 🥇🥈🥉 and the same **"1224" ranking**: tied teams
+  share a rank/medal and the next rank is skipped.
 
 Example output:
 
 ```
-Weekly pairs leaders board 🏆
+Weekly team leaders board 🏆
 
-ArtLike_ ; MY  - 140 points 🥇
-. ; Anastasia S  - 115 points 🥈
-Матвѣй ; Marfa Sh  - 110 points 🥉
-AB ; Elena  - 70 points
+Team 2 (5)  - 140 points 🥇
+Team 1 (5)  - 115 points 🥈
 ```
 
 ## Points & plans
@@ -655,30 +688,27 @@ for you.` and does nothing. Coaches can set or view **other** members' plans.
 - **`/chatid`** — replies with the current chat's ID, type, and title so you can
   discover the value for `TARGET_CHAT_ID`.
 - **Command aliases:** `/setplan` also answers to **`/setmyplan`**,
-  `/setuserplan` and `/setplans`; `/myplan` to `/myplans`; `/pairs` to `/pair`;
-  `/setpairs` to `/setpair`. Telegram bots silently ignore commands they have no
+  `/setuserplan` and `/setplans`; `/myplan` to `/myplans`; `/team` to `/teams`.
+  Telegram bots silently ignore commands they have no
   handler for, so a mistyped name previously produced **no reply at all** and no
   sheet write — these aliases make the command work however it is reasonably
   spelled.
 - **`/whoami`** — replies with your (or, when used as a reply, the replied-to
   user's) Telegram id and name, so coaches can discover member IDs for
   `COACH_IDS` and for username resolution.
-- **`/setpairs <duration> <pair> …`** — **coaches and pairs admins** (anyone in
-  `COACH_IDS` *or* `PAIRS_ADMIN_IDS`): starts a time-boxed pairs
-  round, e.g. `/setpairs 1w @alice+@bob @carol+@dave`. See
-  [Pairs leaderboard](#pairs-leaderboard). Nothing is saved unless every pair is
-  valid; running it again replaces any active round.
-- **`/pairs`** — **coaches and pairs admins** (`COACH_IDS` *or*
-  `PAIRS_ADMIN_IDS`; note this is a *wider* set than the coach-only `/setplan`):
-  replies
-  with the **live standings of the active round**, over the round's own window,
-  using the same formatting as the scheduled board, with the round's dates and
-  status appended (e.g. `(2026-09-07 – 2026-09-13, in progress)`). With no active
-  round it says so and points you at `/setpairs`. Anyone else gets a short
-  "coach or pairs organiser only" message. Like `/setplan`, it is intentionally **not** advertised in the
-  public command menu.
-- **`/pairs stop`** — ends the active round immediately: no final board is posted
-  and pairs stop being tracked. `cancel` and `end` are aliases and the argument is
+- **`/team`** — **coaches and team admins** (anyone in `COACH_IDS` *or*
+  `TEAM_ADMIN_IDS`; note this is a *wider* set than the coach-only `/setplan`).
+  A multi-line message sets up the week's teams — a team name per line followed
+  by its members, resolved through the `Members` tab. See
+  [Team leaderboard](#team-leaderboard). Nothing is saved unless every name
+  resolves and nobody is on two teams; sending it again replaces the active
+  round. Like `/setplan`, it is intentionally **not** advertised in the public
+  command menu.
+- **`/team`** with nothing after it — the **live standings** of the active
+  round with its dates (e.g. `(2026-09-28 – 2026-10-04, in progress)`). With no
+  active round it says so and tells you how to start one.
+- **`/team stop`** — ends the active round immediately: no board is posted and
+  teams stop being tracked. `cancel` and `end` are aliases and the argument is
   case-insensitive.
 
 ---
@@ -700,9 +730,9 @@ for you.` and does nothing. Coaches can set or view **other** members' plans.
 | `POINTS_PER_RUN` | ❌ | `10` | Legacy setting. Under the plan-based model it no longer sets per-run points — it only marks `running` as awardable. Actual points come from each user's plan (set with `/setplan`). |
 | `SEASON_START_DATE` | ❌ | `2026-07-12` | ISO date (`YYYY-MM-DD`). Points and the leaderboard count only submissions dated on or after this date; earlier submissions are ignored so the season restarts everyone at zero without deleting registrations or coach-assigned plans. |
 | `LATE_SUBMISSION_GRACE_UNTIL_HOUR` | ❌ | `9` | The Monday hour (0–23, local `TIMEZONE`) until which a workout dated in the **just-finished** Mon–Sun week is still accepted and scored — the default `9` matches the Mon 09:00/09:05 leaderboards. The row keeps its real `workout_date`, so it counts toward the week being reported. Set to `0` to disable (strict current-week-only). Malformed values (non-integer or outside 0–23) fail fast with a `ConfigError`. |
-| `COACH_IDS` | ❌ | *(empty)* | Comma-separated Telegram user IDs (e.g. `123,456`) of the **coaches**. Coaches can run `/setplan` and manage pairs. **Coaches are never scored:** their workout screenshots are ignored silently, they earn no points or streak bonus, and they never appear on a weekly/monthly board or in a pair — even if the sheet still holds older rows of theirs (nothing is deleted; the rows are simply skipped by every aggregation). Blank/unset → no coaches. Non-integer entries are skipped with a warning. Use `/whoami` (reply to a member) to find IDs. |
-| ~~`PAIRS`~~ | — | *(removed)* | **No longer used.** Pairs are now created by a coach with `/setpairs` and last only for the duration they specify — see [Pairs leaderboard](#pairs-leaderboard). If this variable is still set the bot logs a warning at startup and ignores it; you can safely delete it. |
-| `PAIRS_ADMIN_IDS` | ❌ | *(empty)* | Comma-separated Telegram user IDs (e.g. `123,456`) allowed to manage the **pairs competition** (`/setpairs`, `/pairs`, `/pairs stop`) **without being a coach**. A strictly narrower role than `COACH_IDS`: a pairs admin **cannot** run `/setplan` or view another member's plan. Coaches always keep pairs access too. Blank/unset → only coaches can manage pairs. Non-integer entries are skipped with a warning. Use `/whoami` (reply to a member) to find IDs. |
+| `COACH_IDS` | ❌ | *(empty)* | Comma-separated Telegram user IDs (e.g. `123,456`) of the **coaches**. Coaches can run `/setplan` and manage teams. **Coaches are never scored:** their workout screenshots are ignored silently, they earn no points or streak bonus, and they never appear on a weekly/monthly board or in a pair — even if the sheet still holds older rows of theirs (nothing is deleted; the rows are simply skipped by every aggregation). Blank/unset → no coaches. Non-integer entries are skipped with a warning. Use `/whoami` (reply to a member) to find IDs. |
+| ~~`PAIRS`~~ | — | *(removed)* | **No longer used.** Teams are created by a coach with a multi-line `/team` message and last for the current Mon–Sun week — see [Team leaderboard](#team-leaderboard). If it is still set, the bot logs a warning at startup and ignores it; you can delete the variable. |
+| `TEAM_ADMIN_IDS` | ❌ | *(empty)* | Comma-separated Telegram user IDs (e.g. `123,456`) allowed to manage the **team competition** (`/team`, `/team stop`) **without being a coach**. A strictly narrower role than `COACH_IDS`: a team admin **cannot** run `/setplan` or view another member's plan. Coaches always keep team access too. Blank/unset → only coaches can manage teams. Non-integer entries are skipped with a warning. Use `/whoami` (reply to a member) to find IDs. |
 | `LOG_LEVEL` | ❌ | `INFO` | `DEBUG`/`INFO`/`WARNING`/`ERROR`. |
 
 See [`.env.example`](.env.example) for a copy-paste template.
