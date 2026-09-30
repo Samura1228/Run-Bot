@@ -129,20 +129,24 @@ class LeaderboardService:
         team_entries: list[TeamEntry] = []
         for name, member_ids in teams:
             total = 0.0
-            labels: list[str] = []
+            roster: list[tuple[int, str, float]] = []
             for member_id in member_ids:
                 entry = by_user.get(member_id)
-                if entry is not None:
-                    total += entry.points
+                member_points = entry.points if entry is not None else 0.0
+                total += member_points
                 label = member_names.get(member_id)
                 if not label:
                     label = entry.label() if entry is not None else f"user {member_id}"
-                labels.append(label)
+                roster.append((member_id, label, member_points))
+            # Highest scorer first. Python's sort is stable, so members on
+            # equal points keep the order the coach wrote them in.
+            roster.sort(key=lambda row: -row[2])
             team_entries.append(
                 TeamEntry(
                     name=name,
-                    member_ids=tuple(member_ids),
-                    member_labels=tuple(labels),
+                    member_ids=tuple(row[0] for row in roster),
+                    member_labels=tuple(row[1] for row in roster),
+                    member_points=tuple(row[2] for row in roster),
                     points=round(total, 2),
                 )
             )
@@ -255,10 +259,17 @@ class LeaderboardService:
 
         # _format_ranking gives one line per team, in the same order as
         # ``entries``; the roster goes under each, indented, with a blank line
-        # between teams so the block stays readable at ten-plus names.
+        # between teams so the block stays readable at ten-plus names. Each
+        # member carries their own points, so it is visible who is carrying
+        # the team and who has not started yet.
         ranked = self._format_ranking([_Sized(e) for e in entries]).split("\n")
         blocks: list[str] = []
         for line, entry in zip(ranked, entries):
-            roster = ", ".join(entry.member_labels)
+            roster = " · ".join(
+                f"{label} {format_points(points)}"
+                for label, points in zip(
+                    entry.member_labels, entry.member_points
+                )
+            )
             blocks.append(f"{line}\n   {roster}" if roster else line)
         return f"{header}\n\n" + "\n\n".join(blocks)

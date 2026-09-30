@@ -744,12 +744,12 @@ Both `LeaderboardEntry` and `TeamEntry` satisfy the small `_Rankable` protocol (
 Team standings (in progress) 🏆
 
 Team 1 (5)  - 105 points 🥇
-   Алексей, Елена, Артем, Мирон, Макс
+   Алексей 30 · Елена 25 · Артем 20 · Мирон 15 · Макс 15
 
-Team 2 (5)  - 100 points 🥈
-   Иван, Марфа, Алексей В, Матвей, Анастасия
+Team 2 (5)  - 97.5 points 🥈
+   Иван 40 · Марфа 30 · Матвей 20 · Алексей В 7.5 · Анастасия 0
 ```
-Member names are resolved in `aggregate_teams()` and stored on `TeamEntry.member_labels`, so rendering never touches the sheet: the `Members` tab first (first row wins, so a person listed under two spellings renders under the primary one), then the `Log` display name, then `user <id>`. A failed `Members` read is logged and degrades to the `Log` names rather than breaking the board.
+Member names and their individual points are resolved in `aggregate_teams()` and stored on `TeamEntry.member_labels` / `member_points` (sorted by points descending; Python's stable sort keeps the coach's order within a tie), so rendering never touches the sheet: the `Members` tab first (first row wins, so a person listed under two spellings renders under the primary one), then the `Log` display name, then `user <id>`. A failed `Members` read is logged and degrades to the `Log` names rather than breaking the board.
 
 With no active round `aggregate_teams()` returns no entries and nothing is posted. On demand, `/team` renders the same board over the round's own window.
 

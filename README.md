@@ -561,16 +561,18 @@ Example output:
 Team standings (in progress) 🏆
 
 Team 1 (5)  - 105 points 🥇
-   Алексей, Елена, Артем, Мирон, Макс
+   Алексей 30 · Елена 25 · Артем 20 · Мирон 15 · Макс 15
 
-Team 2 (5)  - 100 points 🥈
-   Иван, Марфа, Алексей В, Матвей, Анастасия
+Team 2 (5)  - 97.5 points 🥈
+   Иван 40 · Марфа 30 · Матвей 20 · Алексей В 7.5 · Анастасия 0
 
 (2026-09-28 – 2026-10-04, in progress)
 ```
 
-The roster under each team lists every member, in the order the coach wrote
-them, including anyone who hasn't logged a workout yet. Names come from the
+The roster under each team shows **every member with their own points**,
+highest first — so it's visible who is carrying the team and who hasn't
+started. Members on equal points keep the order the coach wrote them in, and
+someone with no workouts yet still appears, on `0`. Names come from the
 `Members` tab — the spelling you chose — falling back to the name on their
 submissions if an ID isn't in the directory.
 
