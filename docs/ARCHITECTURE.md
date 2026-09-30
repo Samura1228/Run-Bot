@@ -739,13 +739,17 @@ Both `LeaderboardEntry` and `TeamEntry` satisfy the small `_Rankable` protocol (
 
 **Why the size is shown:** a team's score is a SUM. With equal-sized teams that ranks identically to a per-member average; with unequal teams the bigger one is advantaged, and printing the size makes that visible rather than quietly unfair.
 
-**Teams:**
+**Teams:** each team line is followed by its roster, indented, with a blank line between teams.
 ```
-Weekly team leaders board 🏆
+Team standings (in progress) 🏆
 
-Team 2 (5)  - 140 points 🥇
-Team 1 (5)  - 115 points 🥈
+Team 1 (5)  - 105 points 🥇
+   Алексей, Елена, Артем, Мирон, Макс
+
+Team 2 (5)  - 100 points 🥈
+   Иван, Марфа, Алексей В, Матвей, Анастасия
 ```
+Member names are resolved in `aggregate_teams()` and stored on `TeamEntry.member_labels`, so rendering never touches the sheet: the `Members` tab first (first row wins, so a person listed under two spellings renders under the primary one), then the `Log` display name, then `user <id>`. A failed `Members` read is logged and degrades to the `Log` names rather than breaking the board.
 
 With no active round `aggregate_teams()` returns no entries and nothing is posted. On demand, `/team` renders the same board over the round's own window.
 

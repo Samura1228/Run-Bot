@@ -111,17 +111,38 @@ class LeaderboardService:
             entry.telegram_user_id: entry for entry in entries
         }
 
+        # Member display names come from the Members tab first: that is the
+        # spelling the coach chose and the one people recognise. The Log's
+        # display name is the fallback for an id that isn't in the directory
+        # (an id-only round typed by hand), and the bare id the last resort.
+        # The FIRST row wins, so a person listed twice (e.g. a Russian and a
+        # Latin spelling) renders under their primary name.
+        member_names: dict[int, str] = {}
+        try:
+            for member in await self._sheets.list_members():
+                member_names.setdefault(member["user_id"], member["name"])
+        except Exception as exc:  # noqa: BLE001 - labels must never crash
+            logger.warning(
+                "Teams: could not read Members for display names: %s", exc
+            )
+
         team_entries: list[TeamEntry] = []
         for name, member_ids in teams:
             total = 0.0
+            labels: list[str] = []
             for member_id in member_ids:
                 entry = by_user.get(member_id)
                 if entry is not None:
                     total += entry.points
+                label = member_names.get(member_id)
+                if not label:
+                    label = entry.label() if entry is not None else f"user {member_id}"
+                labels.append(label)
             team_entries.append(
                 TeamEntry(
                     name=name,
                     member_ids=tuple(member_ids),
+                    member_labels=tuple(labels),
                     points=round(total, 2),
                 )
             )
@@ -232,5 +253,12 @@ class LeaderboardService:
             def label(self) -> str:
                 return self._text
 
-        rows = [_Sized(entry) for entry in entries]
-        return f"{header}\n\n{self._format_ranking(rows)}"
+        # _format_ranking gives one line per team, in the same order as
+        # ``entries``; the roster goes under each, indented, with a blank line
+        # between teams so the block stays readable at ten-plus names.
+        ranked = self._format_ranking([_Sized(e) for e in entries]).split("\n")
+        blocks: list[str] = []
+        for line, entry in zip(ranked, entries):
+            roster = ", ".join(entry.member_labels)
+            blocks.append(f"{line}\n   {roster}" if roster else line)
+        return f"{header}\n\n" + "\n\n".join(blocks)

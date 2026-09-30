@@ -207,6 +207,9 @@ class TeamEntry(BaseModel):
 
     name: str
     member_ids: tuple[int, ...]
+    # Display names in the order the coach listed them, already resolved by
+    # the aggregator so rendering never has to touch the sheet.
+    member_labels: tuple[str, ...] = ()
     points: float
 
     @property

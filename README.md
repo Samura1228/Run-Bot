@@ -558,11 +558,21 @@ A late screenshot still lands in time — a Sunday workout posted Monday before
 Example output:
 
 ```
-Weekly team leaders board 🏆
+Team standings (in progress) 🏆
 
-Team 2 (5)  - 140 points 🥇
-Team 1 (5)  - 115 points 🥈
+Team 1 (5)  - 105 points 🥇
+   Алексей, Елена, Артем, Мирон, Макс
+
+Team 2 (5)  - 100 points 🥈
+   Иван, Марфа, Алексей В, Матвей, Анастасия
+
+(2026-09-28 – 2026-10-04, in progress)
 ```
+
+The roster under each team lists every member, in the order the coach wrote
+them, including anyone who hasn't logged a workout yet. Names come from the
+`Members` tab — the spelling you chose — falling back to the name on their
+submissions if an ID isn't in the directory.
 
 ## Points & plans
 
