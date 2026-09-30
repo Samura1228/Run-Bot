@@ -37,7 +37,12 @@ from bot.services.sheets import (
     SheetsService,
     check_sheets,
 )
-from bot.utils.dates import current_week_bounds, today_in
+from bot.utils.dates import (
+    MAX_ROUND_DAYS,
+    MIN_ROUND_DAYS,
+    parse_date_range,
+    today_in,
+)
 from bot.utils.points import (
     DEFAULT_PLAN,
     MAX_PLAN,
@@ -62,18 +67,20 @@ _TEAM_COACH_ONLY_MSG = (
 )
 # Accepted spellings of the /team argument that cancels the active round.
 _TEAM_STOP_ARGS = frozenset({"stop", "cancel", "end"})
+_TEAM_STATUS_ARGS = frozenset({"status", "now", "score"})
 _TEAM_USAGE = (
-    "Usage (coach only) — one message, a team name per block:\n\n"
-    "/team\n"
+    "Usage (coach only) — dates first, then a team name per block:\n\n"
+    "/team 28/09/26 - 04/10/26\n"
     "Team 1\n"
     "Alexey B\n"
     "Elena\n"
     "Team 2\n"
     "Marfa\n"
     "Anastacia S\n\n"
-    "Any line that is NOT a known member name starts a new team. Names come "
-    "from the 'Members' tab of the Google Sheet — add people there first.\n"
-    "/team stop cancels the running round."
+    "Dates are DD/MM/YY (or DD/MM/YYYY) and are REQUIRED. Any line that is "
+    "NOT a known member name starts a new team. Names come from the 'Members' "
+    "tab of the Google Sheet — add people there first.\n"
+    "/team status shows current standings, /team stop cancels the round."
 )
 _NO_ACTIVE_ROUND_MSG = (
     "No team competition is running right now, so no teams are being tracked.\n"
@@ -581,11 +588,12 @@ async def team_command(
     """Create (or stop) the weekly TEAM competition — COACHES & TEAM ADMINS.
 
     Forms:
-      - A multi-line ``/team`` message listing team names and their members
-        (see :data:`_TEAM_USAGE`) → creates a round for the CURRENT Mon–Sun
-        week. Re-running replaces any active round.
+      - ``/team <start> - <end>`` followed by team names and their members
+        (see :data:`_TEAM_USAGE`) → creates a round over that INCLUSIVE date
+        window. The dates are required. Re-running replaces any active round.
+      - ``/team status`` (or ``/team`` alone) → live standings, posted into
+        whichever chat the command was sent from.
       - ``/team stop`` → cancel the active round. No board is posted.
-      - ``/team`` alone → live standings of the active round.
 
     Member names are resolved through the hand-maintained ``Members`` tab.
     Nothing is saved unless EVERY name resolves and nobody appears twice: a
@@ -637,8 +645,13 @@ async def team_command(
             )
             return
 
-        # --- /team alone → live standings -------------------------------- #
-        if not body_lines:
+        # --- /team status → post the standings on demand ----------------- #
+        # Same board the scheduler posts, but triggered by hand: the coach
+        # sends it in the group and everyone sees the current totals without
+        # waiting for the next 3-day tick. Bare /team does the same thing.
+        if not body_lines or (
+            args and args[0].strip().lower() in _TEAM_STATUS_ARGS
+        ):
             leaderboard = _get_leaderboard(context)
             current = await sheets.get_current_team_round()
             if current is None:
@@ -655,12 +668,31 @@ async def team_command(
             )
             await _safe_reply(
                 message,
-                f"{leaderboard.format_teams(entries, start_date, end_date)}\n\n"
+                f"{leaderboard.format_teams(entries, start_date, end_date, final=False)}"
+                f"\n\n"
                 f"({start_date} – {end_date}, in progress)",
             )
             return
 
-        # --- /team <line-up> → create the round -------------------------- #
+        # --- /team <dates> <line-up> → create the round ------------------ #
+        # The date range is REQUIRED and lives on the command line, so a round
+        # is always an explicit window the coach chose rather than an implied
+        # "this week". Both dates are inclusive: a round ending 04/10 counts
+        # everything dated 04/10, i.e. all of that Sunday.
+        header = (message.text or "").splitlines()[0]
+        _, _, date_text = header.partition(" ")
+        window = parse_date_range(date_text)
+        if window is None:
+            await _safe_reply(
+                message,
+                "⚠️ Nothing saved — I need the dates on the first line, "
+                "day first:\n\n/team 28/09/26 - 04/10/26\n\n"
+                f"(a round must be {MIN_ROUND_DAYS}–{MAX_ROUND_DAYS} days and "
+                "end on or after it starts)",
+            )
+            return
+        start_date, end_date = window
+
         try:
             directory = await sheets.member_directory()
         except Exception as exc:
@@ -703,8 +735,6 @@ async def team_command(
             )
             return
 
-        start_date, end_date = current_week_bounds(settings.timezone)
-
         previous = await sheets.get_current_team_round()
         if previous is not None:
             await sheets.set_team_round_status(
@@ -730,7 +760,8 @@ async def team_command(
         await _safe_reply(
             message,
             f"✅ Teams set for {start_date} – {end_date}:\n\n{roster}\n\n"
-            f"The board posts Monday 09:05.{replaced}",
+            f"Standings post every 3 days at 09:05; the final board the "
+            f"morning after {end_date}.{replaced}",
         )
         logger.info(
             "Team round %s created by %s: %d teams, %s–%s.",

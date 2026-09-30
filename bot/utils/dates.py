@@ -8,9 +8,62 @@ DST — the timezone is only used to determine what "today" is.
 
 from __future__ import annotations
 
+import re
 from datetime import date, datetime, timedelta
 from typing import Optional
 from zoneinfo import ZoneInfo
+
+# Guard rails for a team round length (in days), so a typo like "28/09/26 -
+# 04/10/36" can't create a round that never ends.
+MIN_ROUND_DAYS = 1
+MAX_ROUND_DAYS = 365
+
+# "28/09/26 - 04/10/26" and friends. Day and month first (DD/MM — never MM/DD),
+# a 2- or 4-digit year, ``/ . -`` inside a date, and ``- – —`` between the two.
+# ``\d{4}`` is tried before ``\d{2}`` so "2026" is not read as "20" with "26"
+# left over. Note a date may itself use "-", which is why the whole range is
+# matched in one anchored pattern rather than split on the dash.
+_DATE_RANGE_RE = re.compile(
+    r"^\s*(\d{1,2})[./-](\d{1,2})[./-](\d{4}|\d{2})"
+    r"\s*[-–—]\s*"
+    r"(\d{1,2})[./-](\d{1,2})[./-](\d{4}|\d{2})\s*$"
+)
+
+
+def _build_date(day: str, month: str, year: str) -> Optional[date]:
+    """Build a date from DD, MM and a 2- or 4-digit year, or None if invalid."""
+
+    value = int(year)
+    if len(year) == 2:
+        value += 2000
+    try:
+        return date(value, int(month), int(day))
+    except ValueError:
+        return None
+
+
+def parse_date_range(raw: str) -> Optional[tuple[date, date]]:
+    """Parse ``"28/09/26 - 04/10/26"`` into an inclusive ``(start, end)``.
+
+    Day comes FIRST (DD/MM), matching how the coach writes dates; the year may
+    be 2 or 4 digits. Returns ``None`` when the text is malformed, either date
+    is not a real calendar date, the end is before the start, or the span falls
+    outside :data:`MIN_ROUND_DAYS`–:data:`MAX_ROUND_DAYS` — the caller turns any
+    of those into one "nothing was saved" reply.
+    """
+
+    match = _DATE_RANGE_RE.match(raw or "")
+    if match is None:
+        return None
+    start = _build_date(*match.group(1, 2, 3))
+    end = _build_date(*match.group(4, 5, 6))
+    if start is None or end is None:
+        return None
+    span = (end - start).days + 1
+    if not MIN_ROUND_DAYS <= span <= MAX_ROUND_DAYS:
+        return None
+    return start, end
+
 
 def now_in(tz: str) -> datetime:
     """Return the current timezone-aware moment in the given IANA timezone."""

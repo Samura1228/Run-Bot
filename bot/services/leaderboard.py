@@ -197,8 +197,14 @@ class LeaderboardService:
         entries: list[TeamEntry],
         start_date: date,
         end_date: date,
+        final: bool = True,
     ) -> str:
-        """Format the team leaderboard for a round's Mon–Sun week.
+        """Format the team leaderboard for a round's date window.
+
+        ``final`` picks the header: the closing board for the round, or the
+        every-3-days standings while it is still running. The two must be
+        visibly different — people should never mistake a mid-round snapshot
+        for the result.
 
         Uses the SAME renderer as the individual boards, so lines read
         ``{team} ({size})  - {points} points`` (two spaces before the hyphen)
@@ -208,7 +214,11 @@ class LeaderboardService:
         visible instead of quietly unfair.
         """
 
-        header = "Weekly team leaders board 🏆"
+        header = (
+            "Team leaders board 🏆"
+            if final
+            else "Team standings (in progress) 🏆"
+        )
         if not entries:
             return f"{header}\n\nNo teams configured."
 

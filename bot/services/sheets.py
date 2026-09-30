@@ -872,30 +872,36 @@ class SheetsService:
         return self._require_teams_worksheet().get_all_values()
 
     @staticmethod
-    def serialize_teams(teams: Sequence[tuple[str, Sequence[int]]]) -> str:
+    def serialize_teams(teams: Sequence[tuple[str, Sequence[Any]]]) -> str:
         """Serialize teams to the ``Name=id,id|Name=id,id`` cell format.
 
         Chosen over JSON so the cell stays readable and hand-editable in the
         sheet, the same reasoning as the old pairs format. ``|`` separates
         teams, ``=`` separates a team's name from its members, ``,`` separates
-        member ids — so a team name may not contain ``|`` or ``=`` (the command
-        rejects such names before they reach here).
+        members — so a team name may not contain ``|`` or ``=`` (the command
+        rejects such names before they reach here). ``/team`` writes numeric
+        ids; a row typed by hand may use NAMES instead, which
+        :meth:`resolve_team_members` looks up in the ``Members`` tab.
         """
 
         return "|".join(
-            f"{name}=" + ",".join(str(member_id) for member_id in members)
+            f"{name}=" + ",".join(str(member) for member in members)
             for name, members in teams
         )
 
     @staticmethod
-    def parse_teams(raw: str) -> list[tuple[str, list[int]]]:
-        """Parse a ``Name=id,id|Name=id,id`` teams cell.
+    def parse_teams(raw: str) -> list[tuple[str, list[str]]]:
+        """Parse a ``Name=member,member|Name=member`` cell into RAW tokens.
+
+        Members come back as strings, not ids, because a hand-written row may
+        name people instead of pasting numeric ids — resolution happens in
+        :meth:`resolve_team_members`, which needs the async ``Members`` read.
 
         Never raises: a hand-edited or corrupt cell degrades to the entries
         that do parse, so a typo in the sheet cannot break the scheduled board.
         """
 
-        teams: list[tuple[str, list[int]]] = []
+        teams: list[tuple[str, list[str]]] = []
         for chunk in (raw or "").split("|"):
             entry = chunk.strip()
             if not entry:
@@ -904,24 +910,68 @@ class SheetsService:
             if not separator:
                 logger.warning("Teams: skipping malformed entry %r.", entry)
                 continue
-            member_ids: list[int] = []
-            for token in members_raw.split(","):
-                token = token.strip()
-                if not token:
-                    continue
-                try:
-                    member_ids.append(int(token))
-                except ValueError:
-                    logger.warning(
-                        "Teams: skipping non-integer member %r in %r.",
-                        token,
-                        entry,
-                    )
-            if not member_ids:
+            members = [t.strip() for t in members_raw.split(",") if t.strip()]
+            if not members:
                 logger.warning("Teams: entry %r has no members; skipping.", entry)
                 continue
-            teams.append((name.strip(), member_ids))
+            teams.append((name.strip(), members))
         return teams
+
+    async def resolve_team_members(
+        self, teams: Sequence[tuple[str, Sequence[str]]]
+    ) -> list[tuple[str, list[int]]]:
+        """Resolve raw member tokens to Telegram ids.
+
+        A purely numeric token is already an id (what ``/team`` writes). Any
+        other token is a NAME, looked up in the hand-maintained ``Members`` tab
+        — which is the point: a coach can type the round straight into the
+        sheet using the names they already use.
+
+        An unresolvable name is logged and SKIPPED rather than raising. This
+        path runs from the scheduled board with nobody watching, so one typo
+        in the sheet must cost one person, never the whole post. ``/team``
+        itself is strict — it refuses the message instead.
+        """
+
+        needs_directory = any(
+            not token.lstrip("-").isdigit()
+            for _name, members in teams
+            for token in members
+        )
+        directory: dict[str, dict[str, Any]] = {}
+        if needs_directory:
+            try:
+                directory = await self.member_directory()
+            except Exception as exc:  # noqa: BLE001 - board must still post
+                logger.error(
+                    "Teams: could not read Members to resolve names: %s", exc
+                )
+
+        resolved: list[tuple[str, list[int]]] = []
+        for name, members in teams:
+            ids: list[int] = []
+            for token in members:
+                if token.lstrip("-").isdigit():
+                    ids.append(int(token))
+                    continue
+                member = directory.get(self.normalize_member_name(token))
+                if member is None:
+                    logger.warning(
+                        "Teams: member %r in team %r is not in the Members "
+                        "tab; skipping them.",
+                        token,
+                        name,
+                    )
+                    continue
+                ids.append(member["user_id"])
+            if ids:
+                resolved.append((name, ids))
+            else:
+                logger.warning(
+                    "Teams: team %r has no resolvable members; skipping it.",
+                    name,
+                )
+        return resolved
 
     def _parse_teams_row(self, row: list[str]) -> Optional[dict[str, Any]]:
         """Parse one Teams row into a dict, or None when unusable."""
@@ -938,7 +988,12 @@ class SheetsService:
         if not teams:
             return None
         return {
-            "round_id": row[_TEAMS_COL_ROUND_ID].strip(),
+            # A row typed by hand may leave round_id blank; synthesise a stable
+            # one from the dates so the round can still be marked posted.
+            "round_id": (
+                row[_TEAMS_COL_ROUND_ID].strip()
+                or f"manual-{start_date.isoformat()}-{end_date.isoformat()}"
+            ),
             "start_date": start_date,
             "end_date": end_date,
             "teams": teams,
@@ -959,7 +1014,10 @@ class SheetsService:
             record = self._parse_teams_row(row)
             if record is not None:
                 rounds.append(record)
-        return rounds
+        # Resolve names -> ids once per round (a no-op for id-only rows).
+        for record in rounds:
+            record["teams"] = await self.resolve_team_members(record["teams"])
+        return [record for record in rounds if record["teams"]]
 
     async def get_current_team_round(self) -> Optional[dict[str, Any]]:
         """Return the ACTIVE team round, or ``None`` when there is none.

@@ -1,15 +1,17 @@
 """Scheduler service.
 
 Configures an :class:`~apscheduler.schedulers.asyncio.AsyncIOScheduler` with
-cron jobs for the weekly boards (Mon 09:05 — the coach-created TEAM board
-followed by the individual leaderboard) and the monthly leaderboard (1st
-09:00). The scheduler must be started on the same asyncio loop as
-python-telegram-bot (via a PTB post-init hook).
+one daily job (09:05 — the coach-created TEAM board, then the individual
+leaderboard on Mondays) and the monthly leaderboard (1st 09:00). The daily
+cadence exists because a team round can start and end on any date. The
+scheduler must be started on the same asyncio loop as python-telegram-bot
+(via a PTB post-init hook).
 """
 
 from __future__ import annotations
 
 import logging
+from datetime import date
 from typing import Optional
 from zoneinfo import ZoneInfo
 
@@ -36,18 +38,23 @@ async def run_weekly_leaderboard(
     target_chat_id: int,
     tz: str,
 ) -> None:
-    """Post the team board, then the previous week's individual leaderboard.
+    """Post the day's boards: the team board, then Monday's individual one.
 
-    The team board goes FIRST so the two read as one Monday post: teams, then
-    everyone's personal totals. It is a no-op when no team round is active, and
-    its failures are swallowed inside :func:`run_weekly_team_board`, so the
-    individual board always posts regardless.
+    Runs DAILY at 09:05 because a team round can end on any day. The team
+    board goes first so that on a Monday the two read as one post: teams, then
+    everyone's personal totals. Team-board failures are swallowed inside
+    :func:`run_team_board`, so the individual board always posts regardless.
+
+    The individual leaderboard is weekly, so it only posts on Mondays.
     """
 
     try:
-        await run_weekly_team_board(bot, leaderboard, sheets, target_chat_id, tz)
+        await run_team_board(bot, leaderboard, sheets, target_chat_id, tz)
     except Exception as exc:  # noqa: BLE001 - never block the individual board
         logger.error("Team board raised; continuing to the individual board: %s", exc)
+
+    if today_in(tz).weekday() != 0:  # Monday
+        return
 
     start_date, end_date = previous_week_bounds(tz)
     try:
@@ -64,24 +71,52 @@ async def run_weekly_leaderboard(
         logger.error("Failed to send weekly leaderboard: %s", exc)
 
 
-async def run_weekly_team_board(
+# Standings are posted every N days counted from the round's FIRST day.
+TEAM_STANDINGS_EVERY_DAYS = 3
+
+
+def team_board_due(
+    today: date, start_date: date, end_date: date
+) -> Optional[str]:
+    """Return which team board is due today, or ``None``.
+
+    ``"final"`` on the first morning AFTER the round's last day — so a round
+    ending Sunday reports Monday, once the Sunday it counts has fully elapsed.
+    ``"standings"`` on every :data:`TEAM_STANDINGS_EVERY_DAYS`-th day from the
+    start (day 3, 6, 9 …), while the round is running.
+
+    The start day itself is never a standings day (nothing has happened yet),
+    and a round whose start is still in the future posts nothing at all.
+    """
+
+    if today > end_date:
+        # Only the morning right after the round: an older round that was
+        # never posted is still caught, since it stays ``active`` until it is.
+        return "final"
+    if today <= start_date:
+        return None
+    if (today - start_date).days % TEAM_STANDINGS_EVERY_DAYS == 0:
+        return "standings"
+    return None
+
+
+async def run_team_board(
     bot: Bot,
     leaderboard: LeaderboardService,
     sheets: SheetsService,
     target_chat_id: int,
     tz: str,
 ) -> None:
-    """Post the TEAM board for the just-finished week, then retire the round.
+    """Post the team board when one is due, then retire a finished round.
 
-    Called at the start of the Monday 09:05 job, so the team board lands just
-    above the individual one. A silent no-op unless an ``active`` round exists
-    whose week has ended: teams are only tracked while a round is active, and
-    a round created mid-week is reported on the following Monday.
+    Runs daily at 09:05 ahead of the individual board. A silent no-op unless
+    an ``active`` round exists and :func:`team_board_due` says today is either
+    a standings day or the morning after the round ended.
 
-    Once posted the round is marked ``posted`` so it can never be reported
-    twice (which also makes a scheduler misfire or a restart safe). The status
-    is written LAST, only after a confirmed send, so a failed send leaves the
-    round active and it is retried next Monday.
+    A round is marked ``posted`` only after a CONFIRMED send of the final
+    board, so a failed send leaves it active and the next morning retries;
+    that also makes a misfire or restart safe. Standings posts never change
+    the status — they can repeat harmlessly.
     """
 
     try:
@@ -94,42 +129,53 @@ async def run_weekly_team_board(
         logger.debug("No active team round; nothing to post.")
         return
 
-    today = today_in(tz)
+    start_date = current["start_date"]
     end_date = current["end_date"]
-    if today <= end_date:
+    due = team_board_due(today_in(tz), start_date, end_date)
+    if due is None:
         logger.debug(
-            "Team round %s runs until %s; not posting yet.",
+            "Team round %s: no board due today (%s–%s).",
             current["round_id"],
+            start_date,
             end_date,
         )
         return
 
-    start_date = current["start_date"]
     try:
         entries = await leaderboard.aggregate_teams(
             current["teams"], start_date, end_date
         )
-        message = leaderboard.format_teams(entries, start_date, end_date)
+        message = leaderboard.format_teams(
+            entries, start_date, end_date, final=due == "final"
+        )
     except Exception as exc:
         logger.error("Failed to build the team board: %s", exc)
         return
 
+    footer = (
+        f"({start_date} – {end_date})"
+        if due == "final"
+        else f"({start_date} – {end_date}, in progress)"
+    )
     try:
         await bot.send_message(
-            chat_id=target_chat_id,
-            text=f"{message}\n\n({start_date} – {end_date})",
+            chat_id=target_chat_id, text=f"{message}\n\n{footer}"
         )
     except TelegramError as exc:
-        # Leave the round active so next Monday retries it.
+        # Leave the round active so the next morning retries it.
         logger.error("Failed to send the team board: %s", exc)
         return
 
     logger.info(
-        "Posted team board for round %s (%s–%s).",
+        "Posted %s team board for round %s (%s–%s).",
+        due,
         current["round_id"],
         start_date,
         end_date,
     )
+
+    if due != "final":
+        return
 
     try:
         await sheets.set_team_round_status(
@@ -205,14 +251,14 @@ def build_scheduler(
         )
         return scheduler
 
-    # The weekly job posts the TEAM board and then the individual board; the
-    # monthly job is independent. Each swallows its own errors, so a failure in
-    # one can never stop the other from posting.
+    # One daily job posts the TEAM board (when due) and then the individual
+    # board on Mondays; the monthly job is independent. Each swallows its own
+    # errors, so a failure in one can never stop the other from posting.
     scheduler.add_job(
         run_weekly_leaderboard,
-        CronTrigger(day_of_week="mon", hour=9, minute=5, timezone=zone),
+        CronTrigger(hour=9, minute=5, timezone=zone),
         args=[bot, leaderboard, sheets, target_chat_id, tz],
-        id="weekly_leaderboard",
+        id="daily_boards",
         misfire_grace_time=3600,
         coalesce=True,
         replace_existing=True,
@@ -228,8 +274,8 @@ def build_scheduler(
     )
 
     logger.info(
-        "Scheduler configured: weekly team + individual boards (Mon 09:05) & "
-        "monthly (1st 09:00) in %s.",
+        "Scheduler configured: daily boards 09:05 (team board when due, "
+        "individual on Mondays) & monthly (1st 09:00) in %s.",
         tz,
     )
     return scheduler

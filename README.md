@@ -33,7 +33,7 @@ whenever someone posts a **photo**, it:
    before 09:00** (the [late-submission grace
    period](#late-submission-grace-period)), since the weekly boards haven't
    posted yet.
-4. Automatically posts a **weekly team leaderboard** every Monday at 09:05, the
+4. Automatically posts **team standings every 3 days** and a final team board when a round ends, a **weekly individual leaderboard** every Monday at 09:05, the
    **weekly individual leaderboard** every Monday at 09:05, and a **monthly
    leaderboard** on the 1st of each month at 09:00 (Europe/Nicosia). Both weekly
 
@@ -342,11 +342,12 @@ Run Bot uses **long-polling**, so it runs as a **worker** (no HTTP port).
 ## How the leaderboards work
 
 - Times are in **Europe/Nicosia** (Cyprus). Change with `TIMEZONE` if needed.
-- **Weekly (Mon 09:05):** two posts, back to back — first the **team board**
-  with each team's combined points (only when a coach-created round covered the
-  finished week; see [Team leaderboard](#team-leaderboard) below), then the
-  **individual** totals for the previous Monday–Sunday week. With no active
-  round only the individual board posts.
+- **Daily 09:05 — team board when due:** standings every 3 days while a round
+  runs, and the final board the morning after it ends (see
+  [Team leaderboard](#team-leaderboard) below). Silent on every other day and
+  whenever no round is active.
+- **Monday 09:05 — individual:** totals for the previous Monday–Sunday week,
+  posted right after the team board when both fall on the same morning.
 - **Monthly (1st 09:00):** posts totals for the **previous** full calendar month.
 - Rankings sum each user's points over the range (**including** the
   walking/cycling/strength bonus points; legacy `streak_bonus` rows are
@@ -438,12 +439,13 @@ Sheet with three columns — **you fill it in by hand**:
 The bot **never writes to this tab** — add people, fix spellings and rename
 freely without a deploy.
 
-#### Setting up the week's teams
+#### Setting up the teams
 
-One message: a team name on its own line, then its members, repeated.
+One message: **the dates first**, then a team name on its own line followed by
+its members, repeated.
 
 ```
-/team
+/team 28/09/26 - 04/10/26
 Team 1
 Alexey B
 Elena
@@ -458,6 +460,11 @@ Miron
 Alexey V
 ```
 
+**The date range is required.** Written day first — `28/09/26`, `28/09/2026`
+or `28.09.2026` — and **both ends are inclusive**, so a round ending `04/10`
+counts everything dated that Sunday, right up to midnight. A round may be
+1–365 days and need not line up with a calendar week.
+
 Any number of teams, any size — 2×5, 5×2, 3+4+3. The rule is simple: **a line
 that matches someone in `Members` is a member; any other line starts a new
 team**. Team names are free — `Team 1`, `Красные`, whatever.
@@ -470,7 +477,7 @@ The bot confirms:
 Team 1 (5)
 Team 2 (5)
 
-The board posts Monday 09:05.
+Standings post every 3 days at 09:05; the final board the morning after 2026-10-04.
 ```
 
 **Nothing is saved unless everything resolves.** A misspelled name shows up as
@@ -487,21 +494,51 @@ quietly dropping someone:
 
 #### While a round is running
 
-- **`/team`** on its own — live standings plus the round's dates.
+- **`/team status`** — posts the current standings into the chat you send it
+  from, without waiting for the next scheduled one. (`/team` on its own does
+  the same; `now`/`score` also work.)
 - **`/team stop`** — cancel immediately. No board is posted and nothing is
   tracked afterwards. (`cancel`/`end` also work.)
+
+**Every 3 days** from the start date the bot posts standings on its own, at
+09:05 — for a round starting Monday 28/09 that is Thursday 01/10 and Sunday
+04/10. The header says **`Team standings (in progress)`** so a snapshot is
+never mistaken for the result.
 
 Sending a new `/team` line-up **replaces** the active round, so only one
 competition runs at a time. Rounds live in the **`Teams` tab** and survive
 restarts; old rounds are kept for history, never deleted.
 
+#### Setting up a round by hand
+
+You don't have to use the command. Add a row to the **`Teams` tab** directly —
+`start_date`, `end_date` (ISO `2026-09-28`), `status` = `active`, and the
+line-up in the `teams` column, where members may be **names** rather than IDs:
+
+```
+Team 1=Алексей Б,Елена,Артём|Team 2=Марфа Ш,Анастасия С
+```
+
+Names resolve through `Members` exactly as in the command, `round_id` may be
+left blank, and the bot picks the round up on its next 09:05 check. One
+difference from the command: here an unknown name is **skipped with a warning
+in the logs** rather than refusing the round — the board posts unattended and
+must not be blocked by one typo. Check the line-up with `/team status` after
+adding it.
+
 Coaches can always do this; so can anyone in `TEAM_ADMIN_IDS`.
 
-#### When the week ends
+#### When the round ends
 
-On **Monday 09:05** the team board posts **just above** the individual
-leaderboard, then the round is marked finished. It posts **once** — a restart or
-misfire can't duplicate it — and if the send fails it retries the next Monday.
+At **09:05 on the morning after the end date** the final board posts and the
+round is marked finished — so a round ending Sunday is reported Monday, once
+the Sunday it counts has fully elapsed, **just above** the individual weekly
+leaderboard. It posts **once**: a restart or misfire can't duplicate it, and if
+the send fails it retries the next morning.
+
+A late screenshot still lands in time — a Sunday workout posted Monday before
+09:00 counts toward the round, thanks to the
+[grace period](#late-submission-grace-period).
 
 #### Scoring
 
@@ -696,16 +733,18 @@ for you.` and does nothing. Coaches can set or view **other** members' plans.
 - **`/whoami`** — replies with your (or, when used as a reply, the replied-to
   user's) Telegram id and name, so coaches can discover member IDs for
   `COACH_IDS` and for username resolution.
-- **`/team`** — **coaches and team admins** (anyone in `COACH_IDS` *or*
-  `TEAM_ADMIN_IDS`; note this is a *wider* set than the coach-only `/setplan`).
-  A multi-line message sets up the week's teams — a team name per line followed
-  by its members, resolved through the `Members` tab. See
+- **`/team <start> - <end>`** — **coaches and team admins** (anyone in
+  `COACH_IDS` *or* `TEAM_ADMIN_IDS`; note this is a *wider* set than the
+  coach-only `/setplan`). A multi-line message sets up the round — dates on the
+  first line, then a team name per line followed by its members, resolved
+  through the `Members` tab. See
   [Team leaderboard](#team-leaderboard). Nothing is saved unless every name
   resolves and nobody is on two teams; sending it again replaces the active
   round. Like `/setplan`, it is intentionally **not** advertised in the public
   command menu.
-- **`/team`** with nothing after it — the **live standings** of the active
-  round with its dates (e.g. `(2026-09-28 – 2026-10-04, in progress)`). With no
+- **`/team status`** — posts the **live standings** of the active round with
+  its dates (e.g. `(2026-09-28 – 2026-10-04, in progress)`) into the chat it
+  was sent from. Bare `/team` does the same; `now`/`score` are aliases. With no
   active round it says so and tells you how to start one.
 - **`/team stop`** — ends the active round immediately: no board is posted and
   teams stop being tracked. `cancel` and `end` are aliases and the argument is
