@@ -31,6 +31,7 @@ WORKSHEET_NAME = "Log"
 PLANS_WORKSHEET_NAME = "Plans"
 TEAMS_WORKSHEET_NAME = "Teams"
 MEMBERS_WORKSHEET_NAME = "Members"
+COMMANDS_WORKSHEET_NAME = "Commands"
 
 # Append retry policy: up to 3 attempts with exponential backoff (1s, 2s, 4s).
 _APPEND_MAX_ATTEMPTS = 3
@@ -124,6 +125,120 @@ MEMBERS_HEADER_ROW = [
 _MEMBER_COL_NAME = 0
 _MEMBER_COL_USERNAME = 1
 _MEMBER_COL_USER_ID = 2
+
+# --- Commands worksheet --------------------------------------------------- #
+# A generated, human-readable reference of every command the bot answers, so a
+# coach can see what exists (including the coach-only ones) without reading the
+# README. The bot REWRITES this tab on every start, which is the whole point —
+# it can never drift out of date — so hand edits here are lost. Keep the text
+# in sync with the handlers registered in ``bot.main``.
+COMMANDS_HEADER_ROW = [
+    "command",
+    "who can use it",
+    "what it does",
+]
+
+COMMANDS_REFERENCE: tuple[tuple[str, str, str], ...] = (
+    (
+        "(just post a screenshot)",
+        "everyone",
+        "The main interaction — no command needed. Post a Garmin, Strava or "
+        "WHOOP workout screenshot in the group and the bot scores it. Running "
+        "earns plan-based points; walking (40+ min), cycling (60+ min) and "
+        "strength/stretching (15+ min) earn a flat 5. Ordinary photos, other "
+        "apps and unscored sports are ignored in silence.",
+    ),
+    (
+        "/team <start> - <end>",
+        "coaches + TEAM_ADMIN_IDS",
+        "Set up the team competition for a date range, e.g. "
+        "'/team 28/09/26 - 04/10/26' followed by a team name per line and its "
+        "members underneath. Names come from the Members tab. Nothing is saved "
+        "unless every name resolves and nobody is on two teams. Sending a new "
+        "line-up replaces the running round. Alias: /teams.",
+    ),
+    (
+        "/team status",
+        "coaches + TEAM_ADMIN_IDS",
+        "Post the current team standings into this chat right away, without "
+        "waiting for the scheduled one. Aliases: /team now, /team score, or "
+        "just /team on its own.",
+    ),
+    (
+        "/team stop",
+        "coaches + TEAM_ADMIN_IDS",
+        "Cancel the running team round immediately. No final board is posted "
+        "and teams stop being tracked. Aliases: /team cancel, /team end.",
+    ),
+    (
+        "/setplan @user N",
+        "coaches only",
+        "Set a member's weekly plan (N = 2-6 workouts/week), which decides "
+        "their points per run: 30 / N. Target them by @username or by replying "
+        "to their message with '/setplan N'. Aliases: /setmyplan, "
+        "/setuserplan, /setplans.",
+    ),
+    (
+        "/myplan",
+        "everyone (own plan)",
+        "Show your own weekly plan. A coach can add @username, or reply to "
+        "someone's message, to see theirs. Alias: /myplans.",
+    ),
+    (
+        "/whoami",
+        "everyone",
+        "Show your Telegram ID and name. Reply to someone else's message with "
+        "it to get THEIR ID — this is how you fill in the telegram_id column "
+        "of the Members tab and the COACH_IDS / TEAM_ADMIN_IDS variables.",
+    ),
+    (
+        "/chatid",
+        "everyone",
+        "Show this chat's ID, type and title — the value for the "
+        "TARGET_CHAT_ID variable, which decides where the boards are posted.",
+    ),
+    (
+        "/status",
+        "everyone",
+        "Health check: Telegram, the Claude vision API and Google Sheets, each "
+        "reported OK or with a short reason.",
+    ),
+    (
+        "/testsheet",
+        "everyone",
+        "Test the Google Sheets connection and Editor access on its own, with "
+        "a short hint when it fails (sharing, credentials or sheet ID).",
+    ),
+)
+
+# Boards the scheduler posts on its own, listed under the commands so the tab
+# answers "what does this bot do" in full, not just "what can I type".
+SCHEDULE_REFERENCE: tuple[tuple[str, str, str], ...] = (
+    (
+        "(automatic) team standings",
+        "—",
+        "Every 3 days from the round's start date, at 09:05, while a team "
+        "round is running.",
+    ),
+    (
+        "(automatic) team final board",
+        "—",
+        "At 09:05 the morning AFTER the round's end date, so a round ending "
+        "Sunday is reported on Monday once that Sunday has fully counted.",
+    ),
+    (
+        "(automatic) weekly leaderboard",
+        "—",
+        "Every Monday 09:05: individual totals for the previous Mon-Sun week, "
+        "posted right after the team board.",
+    ),
+    (
+        "(automatic) monthly leaderboard",
+        "—",
+        "On the 1st of each month at 09:00: individual totals for the "
+        "previous calendar month.",
+    ),
+)
 
 # --- Teams worksheet ------------------------------------------------------ #
 # One row per coach-created TEAM ROUND. A round covers one Mon-Sun week and is
@@ -284,6 +399,43 @@ class SheetsService:
                 )
 
         self._members_worksheet = members_ws
+
+        # Ensure the Commands reference exists and is CURRENT. Unlike every
+        # other tab this one is fully regenerated on each start: it documents
+        # the bot to whoever opens the sheet, and a stale reference is worse
+        # than none. ``clear()`` first so a row removed from the code does not
+        # linger. Best-effort — a failure here must never stop the bot.
+        try:
+            try:
+                commands_ws = spreadsheet.worksheet(COMMANDS_WORKSHEET_NAME)
+            except gspread.WorksheetNotFound:
+                commands_ws = spreadsheet.add_worksheet(
+                    title=COMMANDS_WORKSHEET_NAME,
+                    rows=max(50, len(COMMANDS_REFERENCE) + len(SCHEDULE_REFERENCE) + 10),
+                    cols=len(COMMANDS_HEADER_ROW),
+                )
+                logger.info(
+                    "Created worksheet %r.", COMMANDS_WORKSHEET_NAME
+                )
+            values = [
+                list(COMMANDS_HEADER_ROW),
+                *[list(row) for row in COMMANDS_REFERENCE],
+                ["", "", ""],
+                *[list(row) for row in SCHEDULE_REFERENCE],
+            ]
+            commands_ws.clear()
+            commands_ws.update(values=values, range_name="A1")
+            logger.info(
+                "Refreshed the %r reference (%d rows).",
+                COMMANDS_WORKSHEET_NAME,
+                len(values) - 1,
+            )
+        except Exception as exc:  # noqa: BLE001 - documentation is not critical
+            logger.warning(
+                "Could not refresh the %r worksheet (non-fatal): %s",
+                COMMANDS_WORKSHEET_NAME,
+                exc,
+            )
 
     async def initialize(self) -> None:
         """Authorize and prepare the worksheet (creating it if missing)."""

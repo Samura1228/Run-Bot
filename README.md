@@ -417,6 +417,14 @@ tracking teams** until the coach sets up new ones.
 > **Nothing is tracked by default.** With no active round there is no team
 > board, no scheduled post and no calculation — it is opt-in per week.
 
+#### The `Commands` tab (generated)
+
+The bot writes a **`Commands` tab** listing every command, who may use it and
+what it does — including the coach-only ones — plus the boards it posts on a
+schedule. It is **regenerated on every start**, so it can never drift out of
+date; any hand edits there are overwritten. Point a new coach at that tab
+instead of explaining the bot.
+
 #### The `Members` tab (do this first)
 
 The coach writes people's **names**, not usernames, so the bot needs a

@@ -157,6 +157,12 @@ timestamp | telegram_user_id | telegram_username | display_name | workout_date |
 
 > **Note on storage types:** Google Sheets stores everything as cells; the "type" column indicates the logical type. IDs are written as **plain text** (leading apostrophe or explicitly value-input as string) to avoid precision loss on large integers.
 
+### Worksheet: `Commands` (generated reference)
+
+A human-readable list of every command — name, who may run it, what it does — plus the scheduled boards. Written by `_init_sync()` on **every start**: the tab is `clear()`ed and rewritten from `COMMANDS_REFERENCE` / `SCHEDULE_REFERENCE` in [`bot/services/sheets.py`](bot/services/sheets.py), so a row deleted from the code disappears from the sheet and the reference can never go stale. Hand edits are therefore lost, which is the intended trade. The whole block is wrapped in its own `try/except`: documentation is not critical and must never stop the bot from starting.
+
+**Keep it in sync:** when you add or remove a `CommandHandler` in `bot.main`, update `COMMANDS_REFERENCE`.
+
 ### Worksheet: `Plans` (per-user weekly plans)
 
 Auto-created (with its header row) on first run alongside the `Log` worksheet. One row per user; IDs stored as plain text (RAW).
