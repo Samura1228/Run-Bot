@@ -59,6 +59,9 @@ _SETPLAN_USAGE = (
     f"(N {MIN_PLAN}–{MAX_PLAN})."
 )
 _COACH_ONLY_MSG = "Only a coach can set or view another member's plan."
+# Shown for /chatid, /status and /testsheet to anyone not in ADMIN_IDS. They
+# expose chat IDs, service-account and API health, so they are operator-only.
+_ADMIN_ONLY_MSG = "This is a bot admin command."
 _SETPLAN_COACH_ONLY_MSG = "Only your coach can set up workouts for you."
 # Shown when someone who is neither a coach nor a TEAM_ADMIN_IDS member tries
 # to run /team. Deliberately does not name who is allowed.
@@ -91,9 +94,10 @@ _NO_ACTIVE_ROUND_MSG = (
 async def chatid_command(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    """Reply with the current chat's ID, type, and title.
+    """Reply with the current chat's ID, type, and title — ADMIN ONLY.
 
-    Registered with a ``CommandHandler("chatid", chatid_command)``. PTB's
+    Restricted to ``ADMIN_IDS``: the chat ID is operational plumbing, not
+    something the group needs. Registered with a ``CommandHandler("chatid", chatid_command)``. PTB's
     ``CommandHandler`` also matches the ``/chatid@BotUsername`` form used in
     groups, so no extra handling is needed for that.
 
@@ -104,6 +108,12 @@ async def chatid_command(
     message = update.effective_message
     chat = update.effective_chat
     if message is None or chat is None:
+        return
+
+    settings = _get_settings(context)
+    caller = message.from_user
+    if settings is None or caller is None or not settings.is_admin(caller.id):
+        await _safe_reply(message, _ADMIN_ONLY_MSG)
         return
 
     # Build the reply. The ID is placed in a <code> block for easy copying.
@@ -864,7 +874,7 @@ async def _check_anthropic(settings: Settings) -> tuple[str, str]:
 async def testsheet_command(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    """Verify Google Sheets connectivity and Editor access, then reply.
+    """Verify Google Sheets connectivity and Editor access — ADMIN ONLY.
 
     Registered with ``CommandHandler("testsheet", testsheet_command)``. Reuses
     the shared :func:`bot.services.sheets.check_sheets` helper, which authorizes
@@ -883,6 +893,10 @@ async def testsheet_command(
         return
 
     settings = _get_settings(context)
+    caller = message.from_user
+    if settings is None or caller is None or not settings.is_admin(caller.id):
+        await _safe_reply(message, _ADMIN_ONLY_MSG)
+        return
     if settings is None:
         try:
             await message.reply_text("❌ Google Sheets: internal error — see logs.")
@@ -908,7 +922,7 @@ async def testsheet_command(
 async def status_command(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    """Report health across Telegram, Anthropic, and Google Sheets.
+    """Report health across Telegram, Anthropic, and Google Sheets — ADMIN ONLY.
 
     Registered with ``CommandHandler("status", status_command)``. Each check is
     guarded in its own try/except so one failing integration still lets the
@@ -921,6 +935,10 @@ async def status_command(
         return
 
     settings = _get_settings(context)
+    caller = message.from_user
+    if settings is None or caller is None or not settings.is_admin(caller.id):
+        await _safe_reply(message, _ADMIN_ONLY_MSG)
+        return
     if settings is None:
         try:
             await message.reply_text("❌ Run Bot Status: internal error — see logs.")

@@ -131,7 +131,9 @@ _MEMBER_COL_USER_ID = 2
 # coach can see what exists (including the coach-only ones) without reading the
 # README. The bot REWRITES this tab on every start, which is the whole point —
 # it can never drift out of date — so hand edits here are lost. Keep the text
-# in sync with the handlers registered in ``bot.main``.
+# in sync with the handlers registered in ``bot.main`` AND with the permission
+# each handler actually enforces — a reference that lies about who may run a
+# command is worse than none.
 COMMANDS_HEADER_ROW = [
     "command",
     "who can use it",
@@ -193,19 +195,19 @@ COMMANDS_REFERENCE: tuple[tuple[str, str, str], ...] = (
     ),
     (
         "/chatid",
-        "everyone",
+        "bot admin only (ADMIN_IDS)",
         "Show this chat's ID, type and title — the value for the "
         "TARGET_CHAT_ID variable, which decides where the boards are posted.",
     ),
     (
         "/status",
-        "everyone",
+        "bot admin only (ADMIN_IDS)",
         "Health check: Telegram, the Claude vision API and Google Sheets, each "
         "reported OK or with a short reason.",
     ),
     (
         "/testsheet",
-        "everyone",
+        "bot admin only (ADMIN_IDS)",
         "Test the Google Sheets connection and Editor access on its own, with "
         "a short hint when it fails (sharing, credentials or sheet ID).",
     ),

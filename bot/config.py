@@ -76,6 +76,25 @@ class Settings(BaseModel):
 
         return user_id in self.coach_ids
 
+    # Telegram user IDs allowed to run the DIAGNOSTIC commands (/chatid,
+    # /status, /testsheet). These expose chat IDs, service-account details and
+    # API health, so they are restricted to whoever operates the bot — a
+    # narrower role again than coach. Sourced from the optional ``ADMIN_IDS``
+    # env var (same comma-separated format as ``COACH_IDS``). An EMPTY set
+    # closes those commands to everyone, which is the safe default for a
+    # permission but does mean losing the variable also loses the diagnostics;
+    # ``load_settings`` logs a loud warning when it is unset.
+    admin_ids: set[int] = Field(default_factory=set)
+
+    def is_admin(self, user_id: int) -> bool:
+        """Return True if the user may run the diagnostic commands.
+
+        Deliberately NOT implied by :meth:`is_coach`: a coach runs the club,
+        an admin runs the bot, and they are usually different people.
+        """
+
+        return user_id in self.admin_ids
+
     def can_manage_teams(self, user_id: int) -> bool:
         """Return True if the user may run /team and /team stop.
 
@@ -167,7 +186,7 @@ def _parse_late_submission_grace_until_hour(raw: Optional[str]) -> Optional[int]
 def _parse_user_ids(raw: Optional[str], var_name: str) -> set[int]:
     """Parse a comma-separated Telegram-user-ID env var into a set of ints.
 
-    Shared by ``COACH_IDS`` and ``TEAM_ADMIN_IDS``, which use the same format
+    Shared by ``COACH_IDS``, ``TEAM_ADMIN_IDS`` and ``ADMIN_IDS``, which use the same format
     (e.g. ``123,456``). Whitespace and blank entries are ignored. Non-integer
     entries are skipped with a logged warning (rather than raising) so a typo
     never blocks boot. A blank/unset value yields an empty set.
@@ -243,6 +262,16 @@ def load_settings() -> Settings:
     team_admin_ids = _parse_user_ids(
         os.environ.get("TEAM_ADMIN_IDS"), "TEAM_ADMIN_IDS"
     )
+    # ADMIN_IDS gates the diagnostic commands. Unset → nobody can run them:
+    # failing CLOSED is right for a permission, but it locks out exactly the
+    # tools you need when something breaks, so say so loudly at boot.
+    admin_ids = _parse_user_ids(os.environ.get("ADMIN_IDS"), "ADMIN_IDS")
+    if not admin_ids:
+        logger.warning(
+            "ADMIN_IDS is not set — /chatid, /status and /testsheet are "
+            "closed to EVERYONE. Set ADMIN_IDS to your Telegram user ID "
+            "(use /whoami) to get the diagnostics back."
+        )
 
     kwargs: dict[str, Any] = {
         "telegram_bot_token": telegram_bot_token,
@@ -252,6 +281,7 @@ def load_settings() -> Settings:
         "target_chat_id": target_chat_id,
         "coach_ids": coach_ids,
         "team_admin_ids": team_admin_ids,
+        "admin_ids": admin_ids,
     }
 
     # Optional overrides.

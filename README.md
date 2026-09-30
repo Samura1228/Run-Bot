@@ -742,8 +742,9 @@ for you.` and does nothing. Coaches can set or view **other** members' plans.
   startup.) On failure it returns a short hint
   (permission denied → share the sheet with the service-account email; bad JSON
   → check `GOOGLE_SERVICE_ACCOUNT_JSON`; missing/incorrect `GOOGLE_SHEET_ID`).
-- **`/chatid`** — replies with the current chat's ID, type, and title so you can
-  discover the value for `TARGET_CHAT_ID`.
+- **`/chatid`** — **bot admin only** (`ADMIN_IDS`): replies with the current
+  chat's ID, type, and title so you can discover the value for
+  `TARGET_CHAT_ID`.
 - **Command aliases:** `/setplan` also answers to **`/setmyplan`**,
   `/setuserplan` and `/setplans`; `/myplan` to `/myplans`; `/team` to `/teams`.
   Telegram bots silently ignore commands they have no
@@ -789,6 +790,7 @@ for you.` and does nothing. Coaches can set or view **other** members' plans.
 | `POINTS_PER_RUN` | ❌ | `10` | Legacy setting. Under the plan-based model it no longer sets per-run points — it only marks `running` as awardable. Actual points come from each user's plan (set with `/setplan`). |
 | `SEASON_START_DATE` | ❌ | `2026-07-12` | ISO date (`YYYY-MM-DD`). Points and the leaderboard count only submissions dated on or after this date; earlier submissions are ignored so the season restarts everyone at zero without deleting registrations or coach-assigned plans. |
 | `LATE_SUBMISSION_GRACE_UNTIL_HOUR` | ❌ | `9` | The Monday hour (0–23, local `TIMEZONE`) until which a workout dated in the **just-finished** Mon–Sun week is still accepted and scored — the default `9` matches the Mon 09:00/09:05 leaderboards. The row keeps its real `workout_date`, so it counts toward the week being reported. Set to `0` to disable (strict current-week-only). Malformed values (non-integer or outside 0–23) fail fast with a `ConfigError`. |
+| `ADMIN_IDS` | ❌ | *(empty)* | Comma-separated Telegram user IDs (e.g. `123,456`) allowed to run the **diagnostic** commands `/chatid`, `/status` and `/testsheet`. These expose chat IDs and service-account/API health, so they belong to whoever **operates** the bot — a separate, narrower role than coach, and **not** implied by `COACH_IDS`. **Blank/unset closes those three commands to everyone**, including you; the bot logs a warning at startup. Non-integer entries are skipped with a warning. |
 | `COACH_IDS` | ❌ | *(empty)* | Comma-separated Telegram user IDs (e.g. `123,456`) of the **coaches**. Coaches can run `/setplan` and manage teams. **Coaches are never scored:** their workout screenshots are ignored silently, they earn no points or streak bonus, and they never appear on a weekly/monthly board or in a pair — even if the sheet still holds older rows of theirs (nothing is deleted; the rows are simply skipped by every aggregation). Blank/unset → no coaches. Non-integer entries are skipped with a warning. Use `/whoami` (reply to a member) to find IDs. |
 | ~~`PAIRS`~~ | — | *(removed)* | **No longer used.** Teams are created by a coach with a multi-line `/team` message and last for the current Mon–Sun week — see [Team leaderboard](#team-leaderboard). If it is still set, the bot logs a warning at startup and ignores it; you can delete the variable. |
 | `TEAM_ADMIN_IDS` | ❌ | *(empty)* | Comma-separated Telegram user IDs (e.g. `123,456`) allowed to manage the **team competition** (`/team`, `/team stop`) **without being a coach**. A strictly narrower role than `COACH_IDS`: a team admin **cannot** run `/setplan` or view another member's plan. Coaches always keep team access too. Blank/unset → only coaches can manage teams. Non-integer entries are skipped with a warning. Use `/whoami` (reply to a member) to find IDs. |

@@ -134,16 +134,16 @@ def build_application(settings: Settings) -> Application:
         # autocomplete list). Default scope + default language is sufficient to
         # surface these in every chat (private + groups). Best-effort: if this
         # fails we log a WARNING and keep running — the bot must still start.
-        # Note: /setplan and /team are intentionally NOT advertised in the
-        # public command menu — they are coach-only (regular users cannot set
-        # up their own workouts or teams). Their handlers are still registered
-        # so coaches can use them.
+        # Note: /setplan and /team (coach-only) and /chatid, /status,
+        # /testsheet (ADMIN_IDS-only) are intentionally NOT advertised in the
+        # public command menu. Their handlers are still registered so the
+        # people who are allowed can use them.
+        # Only the commands EVERY member can actually run are advertised.
+        # /chatid, /status and /testsheet are ADMIN_IDS-only (and /setplan and
+        # /team coach-only), so listing them would just invite refusals.
         commands = [
             BotCommand("myplan", "Show your weekly plan"),
             BotCommand("whoami", "Show your Telegram ID (or reply to someone)"),
-            BotCommand("status", "Check bot health (Telegram/AI/Sheets)"),
-            BotCommand("testsheet", "Test the Google Sheet connection"),
-            BotCommand("chatid", "Show this chat's ID"),
         ]
         try:
             await app.bot.set_my_commands(commands)
