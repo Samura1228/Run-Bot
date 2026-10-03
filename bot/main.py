@@ -30,7 +30,9 @@ from bot.handlers.commands import (
     whoami_command,
 )
 from bot.handlers.errors import error_handler
+from bot.handlers.mention import MentionHandler
 from bot.handlers.photo import PhotoHandler
+from bot.services.assistant import ClaudeAssistantService
 from bot.services.leaderboard import LeaderboardService
 from bot.services.scheduler import build_scheduler
 from bot.services.sheets import SheetsService
@@ -81,6 +83,37 @@ def build_application(settings: Settings) -> Application:
         activity_points=activity_points,
     )
     application.add_handler(MessageHandler(filters.PHOTO, photo_handler))
+
+    # The in-chat assistant: answers @mentions in the target group only. The
+    # handler itself enforces the chat gate, the "is it addressed to me" check
+    # and the rate limits — the filter here is only a cheap pre-screen, since
+    # the bot receives every message in the group (that is how the photo
+    # pipeline works at all).
+    if settings.assistant_enabled and settings.target_chat_id is not None:
+        assistant = ClaudeAssistantService(
+            api_key=settings.anthropic_api_key,
+            model=settings.assistant_model,
+        )
+        application.add_handler(
+            MessageHandler(
+                filters.TEXT & ~filters.COMMAND,
+                MentionHandler(settings, assistant, sheets),
+            )
+        )
+        logger.info(
+            "Assistant enabled (model=%s, %ds per-user cooldown, %d/hour per "
+            "chat).",
+            settings.assistant_model,
+            settings.assistant_user_cooldown_seconds,
+            settings.assistant_chat_hourly_limit,
+        )
+    elif not settings.assistant_enabled:
+        logger.info("ASSISTANT_ENABLED is off — @mentions are not answered.")
+    else:
+        logger.warning(
+            "TARGET_CHAT_ID is not set — the assistant is disabled (it only "
+            "answers in the target group)."
+        )
 
     # Register utility & diagnostic commands (work in any chat type).
     application.add_handler(CommandHandler("chatid", chatid_command))

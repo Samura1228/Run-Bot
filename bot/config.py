@@ -85,6 +85,18 @@ class Settings(BaseModel):
     # permission but does mean losing the variable also loses the diagnostics;
     # ``load_settings`` logs a loud warning when it is unset.
     admin_ids: set[int] = Field(default_factory=set)
+    # --- In-chat assistant ------------------------------------------------ #
+    # Whether the bot answers @mentions in the target group at all. A kill
+    # switch that needs no deploy: set ASSISTANT_ENABLED=false and the handler
+    # is not registered.
+    assistant_enabled: bool = True
+    # Model for the assistant, separate from the vision model: the two have
+    # very different jobs and are worth tuning apart.
+    assistant_model: str = "claude-sonnet-5-5"
+    # Per-member cooldown and a rolling per-chat hourly cap. Every answer is a
+    # paid API call plus a few sheet reads, and a group can chatter.
+    assistant_user_cooldown_seconds: int = Field(default=10, ge=0)
+    assistant_chat_hourly_limit: int = Field(default=15, ge=0)
 
     def is_admin(self, user_id: int) -> bool:
         """Return True if the user may run the diagnostic commands.
@@ -283,6 +295,32 @@ def load_settings() -> Settings:
         "team_admin_ids": team_admin_ids,
         "admin_ids": admin_ids,
     }
+
+    # --- Assistant overrides ---------------------------------------------- #
+    raw_enabled = (os.environ.get("ASSISTANT_ENABLED") or "").strip().lower()
+    if raw_enabled:
+        # Anything other than an explicit "off" word keeps it enabled, so a
+        # typo can never silently disable the feature.
+        kwargs["assistant_enabled"] = raw_enabled not in {
+            "0", "false", "no", "off",
+        }
+    if os.environ.get("ASSISTANT_MODEL"):
+        kwargs["assistant_model"] = os.environ["ASSISTANT_MODEL"].strip()
+    for env_name, field in (
+        ("ASSISTANT_USER_COOLDOWN_SECONDS", "assistant_user_cooldown_seconds"),
+        ("ASSISTANT_CHAT_HOURLY_LIMIT", "assistant_chat_hourly_limit"),
+    ):
+        raw_value = (os.environ.get(env_name) or "").strip()
+        if not raw_value:
+            continue
+        try:
+            kwargs[field] = int(raw_value)
+        except ValueError:
+            logger.warning(
+                "Ignoring invalid %s=%r (not an integer); using the default.",
+                env_name,
+                raw_value,
+            )
 
     # Optional overrides.
     if os.environ.get("ANTHROPIC_MODEL"):

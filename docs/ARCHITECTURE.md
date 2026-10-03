@@ -632,6 +632,20 @@ Historical `streak_bonus` rows are **left in the sheet** as a record but are **s
 
 ---
 
+### In-chat assistant (`bot/handlers/mention.py`, `bot/services/assistant.py`)
+
+Answers a member's question when they @mention the bot, or reply to one of its messages, in `TARGET_CHAT_ID`.
+
+**Why a `filters.TEXT` handler is safe here:** the bot already receives every message in the group — that is how `MessageHandler(filters.PHOTO, ...)` sees screenshots at all — so privacy mode is off. The filter is only a cheap pre-screen; the handler enforces the real gates in order: target chat → addressed to the bot → question length → rate limits. Every rejection is **silent and logged**, never announced.
+
+**The system prompt is generated** by `build_system_prompt()` from `bot.utils.points` (`ACTIVITY_MIN_MINUTES`, `BONUS_ACTIVITY_POINTS`, `STANDARD_POINTS_PER_WEEK`, `MIN_PLAN`/`MAX_PLAN`, `OVERACHIEVEMENT_RATE`). Change a threshold and the assistant's answer changes with it — the same anti-drift reasoning as the generated `Commands` worksheet. ~750 tokens.
+
+**Per-question context** is gathered best-effort by `_personal_context()`: the asker's plan, their points this week, and their team in the active round. Each read is independently guarded — a partial context beats refusing to answer. A coach gets an explicit note that coaches are not scored, so the model does not imply they have been idle.
+
+**Rate limiting** (`RateLimiter`) is in-memory: a per-user cooldown plus a rolling per-chat hourly deque. A restart clears it, which is acceptable for a spend guard and keeps chat traffic out of the sheet. The limit is recorded only after an answer exists, so a failed API call does not consume the member's cooldown.
+
+**Request shape:** no `temperature` (Sonnet 5.5 rejects a non-default value) and no `output_config` (it would fail against an older installed SDK; answers are short enough that the default effort is affordable). Every API failure degrades to `None` and the bot stays quiet rather than posting an error into the group.
+
 ## 6. Scheduling Design
 
 ### Coexistence with the PTB event loop
@@ -779,6 +793,10 @@ With no active round `aggregate_teams()` returns no entries and nothing is poste
 | `POINTS_PER_RUN` | no | Legacy gate value (default `10`). Under the plan-based model this no longer sets the per-workout points — it only ensures `running` is an awardable activity type; actual points come from `workout_points()` (see Section 5). |
 | `SEASON_START_DATE` | no | ISO date `YYYY-MM-DD` (default `2026-07-12`). Points and the leaderboard count **only** submissions dated **on or after** this date; earlier submissions are ignored so the season restarts everyone at zero without deleting registrations or coach-assigned plans (see Section 5). Parsed into `Settings.season_start_date` (a `datetime.date`); an invalid value fails fast at startup. |
 | `LATE_SUBMISSION_GRACE_UNTIL_HOUR` | no | Integer hour `0`–`23` (default `9`). The **Monday** hour (local `TIMEZONE`) until which a workout dated in the **just-finished** Mon–Sun week is still accepted and scored — the default `9` matches the Mon 09:00/09:05 leaderboards. The row keeps its **real** `workout_date`, so it counts toward the week being reported (see Section 5). Set to `0` to **disable** the grace period (strict current-week-only). Parsed into `Settings.late_submission_grace_until_hour`; a non-integer or out-of-range value raises `ConfigError` at startup, like `SEASON_START_DATE`. |
+| `ASSISTANT_ENABLED` | no | Whether the bot answers @mentions (default on). Any of `0/false/no/off` disables it; anything else leaves it on, so a typo cannot silently kill the feature. The handler is not registered at all when off, or when `TARGET_CHAT_ID` is unset. |
+| `ASSISTANT_MODEL` | no | Model for the in-chat assistant, separate from `ANTHROPIC_MODEL` (vision). Default `claude-sonnet-5-5`. |
+| `ASSISTANT_USER_COOLDOWN_SECONDS` | no | Per-member cooldown between answered questions (default 10). |
+| `ASSISTANT_CHAT_HOURLY_LIMIT` | no | Rolling cap on answers per hour for the whole chat (default 15). |
 | `ADMIN_IDS` | no | Comma-separated Telegram user IDs allowed to run the **diagnostic** commands (`/chatid`, `/status`, `/testsheet`), which expose chat IDs and service-account/API health. A separate role from `COACH_IDS` and **not** implied by it: a coach runs the club, an admin runs the bot. Blank/unset → empty set, which **closes those commands to everyone** — failing closed is right for a permission but removes the tools you need during an incident, so `load_settings()` logs a loud warning when it is unset. Exposed via `Settings.admin_ids` / `Settings.is_admin(user_id)`. |
 | `COACH_IDS` | no | Comma-separated Telegram user IDs (e.g. `123,456`) of the coaches — allowed to run `/setplan` and manage teams. **Coaches never score.** The set is passed to `SheetsService(excluded_user_ids=…)`, where — exactly like the `SEASON_START_DATE` cutoff — it is applied by every aggregation read (`read_rows_in_range`, `count_user_workouts_in_week`, `sum_user_points_in_range`), so a coach's rows never reach a leaderboard, a pair total or the streak rollover, without deleting anything. The photo handler additionally drops a coach's photo before the download and vision call. Blank/unset → empty set. Non-integer entries are **skipped with a logged warning**. Exposed via `Settings.coach_ids` / `Settings.is_coach(user_id)`. |
 | `TEAM_ADMIN_IDS` | no | Comma-separated Telegram user IDs (e.g. `123,456`) allowed to manage the **team competition** — `/team` and `/team stop` — **without being a coach**. Deliberately a separate, narrower list than `COACH_IDS`: a team admin **cannot** run `/setplan` or view another member's plan. Coaches always retain team access. Blank/unset → empty set (only coaches manage teams). Parsed by the same `_parse_user_ids` helper as `COACH_IDS`, so non-integer entries are **skipped with a logged warning** (never a boot failure). Exposed via `Settings.team_admin_ids` and the `Settings.can_manage_teams(user_id)` helper. |

@@ -151,6 +151,17 @@ COMMANDS_REFERENCE: tuple[tuple[str, str, str], ...] = (
         "apps and unscored sports are ignored in silence.",
     ),
     (
+        "@<the bot> <question>",
+        "everyone, in the club group only",
+        "Ask the bot a question — mention it, or reply to one of its messages, "
+        "e.g. '@bot how long do I have to cycle for points?'. It answers from "
+        "the club's rules and your own data (your plan, your points this week, "
+        "your team). It will not answer health or injury questions, and it "
+        "never invents a rule — if it does not know, it says so. Limits: one "
+        "question per person every 10 seconds, 15 per hour in the chat. It "
+        "stays silent in private chats and any other group.",
+    ),
+    (
         "/team <start> - <end>",
         "coaches + TEAM_ADMIN_IDS",
         "Set up the team competition for a date range, e.g. "

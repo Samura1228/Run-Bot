@@ -593,6 +593,41 @@ on `0`. Members level on points keep the order the coach wrote them in. Names
 come from the `Members` tab — the spelling you chose — falling back to the
 name on their submissions if an ID isn't in the directory.
 
+## Ask the bot (in-chat assistant)
+
+Mention the bot in the club group with a question and it answers:
+
+```
+@runcy_bot сколько надо ехать на велосипеде, чтобы получить баллы?
+→ Минимум 60 минут, тогда начисляется 5 баллов.
+```
+
+Replying to one of the bot's own messages works too. It answers in the
+language you asked in.
+
+**What it knows.** The club's rules — and crucially, the rules section of its
+prompt is **generated from the same constants that score workouts**, so it can
+never quote a threshold the bot no longer enforces. It also sees **your own
+data**: your weekly plan, your points so far this week, and which team you are
+on. So "сколько у меня баллов?" works.
+
+**What it will not do**
+
+- **No health advice.** Pain, injury, illness, medication, training while
+  unwell — it declines and points you at a doctor or the coach. This is
+  deliberate and it holds even if you insist.
+- **No invented rules.** If the answer isn't in what it was given, it says it
+  doesn't know and suggests asking the coach.
+- **No actions.** It cannot award points, set plans or change teams.
+
+**Where it works.** The club group only (`TARGET_CHAT_ID`). In a private chat,
+or any other group the bot is added to, it stays completely silent.
+
+**Limits.** One question per person every 10 seconds, and 15 per hour across
+the chat. Over the limit it simply doesn't answer — announcing the limit would
+be the same spam the rest of the bot avoids. Both are configurable, and
+`ASSISTANT_ENABLED=false` turns the whole thing off without a deploy.
+
 ## Points & plans
 
 Instead of a flat points-per-run, each user has a weekly **plan** — how many
