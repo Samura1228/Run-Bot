@@ -529,8 +529,8 @@ class SheetsService:
         """Return parsed rows whose ``workout_date`` is within the range.
 
         Each returned dict has: ``telegram_user_id`` (int), ``telegram_username``
-        (str), ``display_name`` (str), ``workout_date`` (date), and ``points``
-        (float). Points are parsed as floats so fractional per-workout values
+        (str), ``display_name`` (str), ``workout_date`` (date),
+        ``activity_type`` (str) and ``points`` (float). Points are parsed as floats so fractional per-workout values
         (e.g. ``7.5``) aggregate correctly. Rows that fail parsing are skipped.
         """
 
@@ -569,6 +569,7 @@ class SheetsService:
                     "telegram_username": row[_COL_USERNAME],
                     "display_name": row[_COL_DISPLAY_NAME],
                     "workout_date": wdate,
+                    "activity_type": row[_COL_ACTIVITY_TYPE],
                     "points": points,
                 }
             )

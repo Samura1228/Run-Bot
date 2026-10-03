@@ -213,6 +213,9 @@ class TeamEntry(BaseModel):
     member_labels: tuple[str, ...] = ()
     # Each member's points for the range, parallel to ``member_labels``.
     member_points: tuple[float, ...] = ()
+    # Each member's already-rendered activity split (e.g. "run 20, walk 5"),
+    # parallel to ``member_labels``; empty for someone with no workouts.
+    member_activities: tuple[str, ...] = ()
     points: float
 
     @property

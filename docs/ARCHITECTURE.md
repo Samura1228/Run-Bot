@@ -736,7 +736,7 @@ Sam  - 20 points
 
 A coach sets up the week's teams with a multi-line `/team` message (Section 8); each team competes on its members' **combined** weekly points.
 
-1. Call `aggregate(start, end)` **verbatim** — the same `read_rows_in_range()` data path, the same `SEASON_START_DATE` cutoff, the same coach exclusion, the same legacy-`streak_bonus` exclusion, and the same already-stored point values. There are no team multipliers.
+1. Call `_aggregate_with_activities(start, end)`, which is what `aggregate()` itself wraps — the same `read_rows_in_range()` data path in a SINGLE read (the Log is fetched whole, so totals and the per-activity split are computed together rather than in two passes), the same `SEASON_START_DATE` cutoff, the same coach exclusion, the same legacy-`streak_bonus` exclusion, and the same already-stored point values. There are no team multipliers.
 2. Index the resulting `LeaderboardEntry` list by `telegram_user_id`, then sum each team's members. A member with no rows in the range contributes `0` and never drops the team.
 3. Sort by points **descending**, tie-broken by the team name lowercased (deterministic ordering within a tie).
 4. Render with the **same** `_format_ranking()` used by the individual boards, so the `{label}  - {points} points` layout, the medals and the "1224" tie ranking are identical. `format_teams()` wraps each entry in a small render shim whose label carries the member count, giving `Team 1 (5)  - 30 points 🥇`.
@@ -750,12 +750,15 @@ Both `LeaderboardEntry` and `TeamEntry` satisfy the small `_Rankable` protocol (
 Team standings (in progress) 🏆
 
 Team 1 (5)  - 105 points 🥇
-   Алексей 30 · Елена 25 · Артем 20 · Мирон 15 · Макс 15
+   Алексей 30   run 20, walk 5, ride 5
+   Елена 25   run 20, strength 5
+   Артем 20   run 20
 
-Team 2 (5)  - 97.5 points 🥈
-   Иван 40 · Марфа 30 · Матвей 20 · Алексей В 7.5 · Анастасия 0
+Team 2 (5)  - 100 points 🥈
+   Иван 40   run 30, walk 5, ride 5
+   Анастасия 0
 ```
-Member names and their individual points are resolved in `aggregate_teams()` and stored on `TeamEntry.member_labels` / `member_points` (sorted by points descending; Python's stable sort keeps the coach's order within a tie), so rendering never touches the sheet: the `Members` tab first (first row wins, so a person listed under two spellings renders under the primary one), then the `Log` display name, then `user <id>`. A failed `Members` read is logged and degrades to the `Log` names rather than breaking the board.
+Member names, their individual points and their per-activity split are resolved in `aggregate_teams()` and stored on `TeamEntry.member_labels` / `member_points` / `member_activities` (sorted by points descending; Python's stable sort keeps the coach's order within a tie), so rendering never touches the sheet: the `Members` tab first (first row wins, so a person listed under two spellings renders under the primary one), then the `Log` display name, then `user <id>`. A failed `Members` read is logged and degrades to the `Log` names rather than breaking the board.
 
 With no active round `aggregate_teams()` returns no entries and nothing is posted. On demand, `/team` renders the same board over the round's own window.
 

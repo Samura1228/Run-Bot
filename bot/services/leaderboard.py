@@ -19,6 +19,40 @@ logger = logging.getLogger(__name__)
 
 _MEDALS = {1: "🥇", 2: "🥈", 3: "🥉"}
 
+# Activity labels for the team board's per-member split, in a FIXED order so
+# every line reads the same way regardless of what each person happened to do.
+# Short forms on purpose — "strength session" would wrap on a phone.
+_ACTIVITY_ORDER: tuple[tuple[str, str], ...] = (
+    ("running", "run"),
+    ("walking", "walk"),
+    ("cycling", "ride"),
+    ("strength", "strength"),
+)
+
+
+def _format_activities(points_by_activity: dict[str, float]) -> str:
+    """Render one member's split as ``"run 20, walk 5"``.
+
+    Activities worth nothing are omitted, the order is fixed (see
+    :data:`_ACTIVITY_ORDER`), and anything unrecognised is appended under its
+    own raw name rather than silently dropped — if a new activity type is ever
+    scored, the board shows it instead of quietly losing the points.
+    """
+
+    if not points_by_activity:
+        return ""
+    parts: list[str] = []
+    seen: set[str] = set()
+    for key, label in _ACTIVITY_ORDER:
+        value = points_by_activity.get(key, 0.0)
+        seen.add(key)
+        if value:
+            parts.append(f"{label} {format_points(value)}")
+    for key, value in sorted(points_by_activity.items()):
+        if key not in seen and value:
+            parts.append(f"{key} {format_points(value)}")
+    return ", ".join(parts)
+
 
 class _Rankable(Protocol):
     """Minimal surface the shared renderer needs from a leaderboard row.
@@ -43,15 +77,30 @@ class LeaderboardService:
     async def aggregate(
         self, start_date: date, end_date: date
     ) -> list[LeaderboardEntry]:
-        """Aggregate points per user over ``[start_date, end_date]``.
+        """Aggregate points per user over ``[start_date, end_date]``."""
+
+        entries, _breakdown = await self._aggregate_with_activities(
+            start_date, end_date
+        )
+        return entries
+
+    async def _aggregate_with_activities(
+        self, start_date: date, end_date: date
+    ) -> tuple[list[LeaderboardEntry], dict[int, dict[str, float]]]:
+        """Return per-user totals AND their per-activity split, in ONE read.
+
+        The team board needs both, and the Log is read whole each time, so
+        computing them together keeps it to a single fetch instead of two.
 
         Groups by ``telegram_user_id``, sums points, keeps the latest display
-        name/username seen, then sorts by points desc, display name asc.
+        name/username seen, then sorts by points desc, display name asc. The
+        second value maps ``user_id -> {activity_type: points}``.
         """
 
         rows = await self._sheets.read_rows_in_range(start_date, end_date)
 
         totals: dict[int, dict[str, Any]] = {}
+        breakdown: dict[int, dict[str, float]] = {}
         for row in rows:
             user_id = row["telegram_user_id"]
             entry = totals.setdefault(
@@ -67,6 +116,13 @@ class LeaderboardService:
             entry["display_name"] = row["display_name"]
             entry["telegram_username"] = row["telegram_username"]
 
+            activity = (row.get("activity_type") or "").strip().lower()
+            if activity:
+                per_user = breakdown.setdefault(user_id, {})
+                per_user[activity] = round(
+                    per_user.get(activity, 0.0) + row["points"], 2
+                )
+
         entries = [
             LeaderboardEntry(
                 telegram_user_id=user_id,
@@ -77,7 +133,7 @@ class LeaderboardService:
             for user_id, data in totals.items()
         ]
         entries.sort(key=lambda e: (-e.points, e.label().lower()))
-        return entries
+        return entries, breakdown
 
     async def aggregate_teams(
         self,
@@ -106,7 +162,9 @@ class LeaderboardService:
             logger.info("No teams configured; skipping team aggregation.")
             return []
 
-        entries = await self.aggregate(start_date, end_date)
+        entries, breakdown = await self._aggregate_with_activities(
+            start_date, end_date
+        )
         by_user: dict[int, LeaderboardEntry] = {
             entry.telegram_user_id: entry for entry in entries
         }
@@ -129,7 +187,7 @@ class LeaderboardService:
         team_entries: list[TeamEntry] = []
         for name, member_ids in teams:
             total = 0.0
-            roster: list[tuple[int, str, float]] = []
+            roster: list[tuple[int, str, float, str]] = []
             for member_id in member_ids:
                 entry = by_user.get(member_id)
                 member_points = entry.points if entry is not None else 0.0
@@ -137,7 +195,14 @@ class LeaderboardService:
                 label = member_names.get(member_id)
                 if not label:
                     label = entry.label() if entry is not None else f"user {member_id}"
-                roster.append((member_id, label, member_points))
+                roster.append(
+                    (
+                        member_id,
+                        label,
+                        member_points,
+                        _format_activities(breakdown.get(member_id, {})),
+                    )
+                )
             # Highest scorer first. Python's sort is stable, so members on
             # equal points keep the order the coach wrote them in.
             roster.sort(key=lambda row: -row[2])
@@ -147,6 +212,7 @@ class LeaderboardService:
                     member_ids=tuple(row[0] for row in roster),
                     member_labels=tuple(row[1] for row in roster),
                     member_points=tuple(row[2] for row in roster),
+                    member_activities=tuple(row[3] for row in roster),
                     points=round(total, 2),
                 )
             )
@@ -260,16 +326,19 @@ class LeaderboardService:
         # _format_ranking gives one line per team, in the same order as
         # ``entries``; the roster goes under each, indented, with a blank line
         # between teams so the block stays readable at ten-plus names. Each
-        # member carries their own points, so it is visible who is carrying
-        # the team and who has not started yet.
+        # member gets their OWN line with their points and the activity split,
+        # so it is visible who is carrying the team, who has not started, and
+        # how the points were earned.
         ranked = self._format_ranking([_Sized(e) for e in entries]).split("\n")
         blocks: list[str] = []
         for line, entry in zip(ranked, entries):
-            roster = " · ".join(
-                f"{label} {format_points(points)}"
-                for label, points in zip(
-                    entry.member_labels, entry.member_points
-                )
-            )
-            blocks.append(f"{line}\n   {roster}" if roster else line)
+            rows = []
+            for label, points, activities in zip(
+                entry.member_labels, entry.member_points, entry.member_activities
+            ):
+                text = f"   {label} {format_points(points)}"
+                if activities:
+                    text = f"{text}   {activities}"
+                rows.append(text)
+            blocks.append("\n".join([line, *rows]) if rows else line)
         return f"{header}\n\n" + "\n\n".join(blocks)

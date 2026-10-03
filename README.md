@@ -569,20 +569,29 @@ Example output:
 Team standings (in progress) 🏆
 
 Team 1 (5)  - 105 points 🥇
-   Алексей 30 · Елена 25 · Артем 20 · Мирон 15 · Макс 15
+   Алексей 30   run 20, walk 5, ride 5
+   Елена 25   run 20, strength 5
+   Артем 20   run 20
+   Мирон 15   run 10, walk 5
+   Макс 15   run 10, strength 5
 
-Team 2 (5)  - 97.5 points 🥈
-   Иван 40 · Марфа 30 · Матвей 20 · Алексей В 7.5 · Анастасия 0
+Team 2 (5)  - 100 points 🥈
+   Иван 40   run 30, walk 5, ride 5
+   Марфа 30   run 30
+   Матвей 20   run 10, walk 5, strength 5
+   Алексей В 10   run 10
+   Анастасия 0
 
 (2026-09-28 – 2026-10-04, in progress)
 ```
 
-The roster under each team shows **every member with their own points**,
-highest first — so it's visible who is carrying the team and who hasn't
-started. Members on equal points keep the order the coach wrote them in, and
-someone with no workouts yet still appears, on `0`. Names come from the
-`Members` tab — the spelling you chose — falling back to the name on their
-submissions if an ID isn't in the directory.
+Each member gets a line with **their own points and how they earned them** —
+highest scorer first, so it's visible who is carrying the team and who hasn't
+started. Activities worth nothing are left out, the order is always
+run → walk → ride → strength, and someone with no workouts yet still appears,
+on `0`. Members level on points keep the order the coach wrote them in. Names
+come from the `Members` tab — the spelling you chose — falling back to the
+name on their submissions if an ID isn't in the directory.
 
 ## Points & plans
 
