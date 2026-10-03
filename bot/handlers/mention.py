@@ -3,10 +3,16 @@
 Answers a member's question when they @mention the bot (or reply to one of its
 messages) in the target group. Deliberately narrow:
 
-* **Only the target chat.** Not private chats, not any other group the bot is
-  added to. The bot already receives every message in the group (that is how
-  the photo pipeline works), so without this gate it would answer anywhere.
-* **Only when addressed.** A plain message is never answered.
+* **The club group, plus the admin's private chat.** Any other group the bot
+  is added to gets nothing, and a private chat gets nothing unless the sender
+  is in ``ADMIN_IDS`` — that private channel exists so the assistant can be
+  tested before the whole club sees it. The bot already receives every message
+  in the group (that is how the photo pipeline works), so without this gate it
+  would answer anywhere.
+* **Only when addressed** — in the group. In a one-to-one chat with the admin
+  no @mention is needed.
+* **The group can be switched off** (``ASSISTANT_GROUP_ENABLED``) while the
+  admin's private chat keeps working.
 * **Rate limited** per member and per chat, because every answer costs an API
   call and a group can produce a lot of chatter.
 
@@ -22,7 +28,7 @@ from collections import deque
 from typing import Optional
 
 from telegram import Update
-from telegram.constants import MessageEntityType
+from telegram.constants import ChatType, MessageEntityType
 from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
@@ -42,21 +48,25 @@ MIN_QUESTION_CHARS = 3
 
 
 class RateLimiter:
-    """Per-user cooldown plus a rolling per-chat hourly cap.
+    """Per-user cooldown plus a rolling hourly cap kept PER CHAT.
 
-    In-memory on purpose: a restart clears it, which is acceptable for a
-    spend guard on a ten-person club and avoids putting chat traffic in the
-    sheet. Both limits are checked together so one chatty member cannot
-    exhaust the chat's hourly budget faster than the cooldown allows.
+    The hourly cap is keyed by chat id so the admin's private testing does not
+    eat the group's budget (and vice versa) — with two chats allowed, a single
+    shared counter would silently couple them.
+
+    In-memory on purpose: a restart clears it, which is acceptable for a spend
+    guard on a ten-person club and avoids putting chat traffic in the sheet.
     """
 
     def __init__(self, per_user_seconds: int, per_chat_hourly: int) -> None:
         self._per_user_seconds = per_user_seconds
         self._per_chat_hourly = per_chat_hourly
         self._last_by_user: dict[int, float] = {}
-        self._chat_hits: deque[float] = deque()
+        self._chat_hits: dict[int, deque[float]] = {}
 
-    def check(self, user_id: int, now: Optional[float] = None) -> Optional[str]:
+    def check(
+        self, user_id: int, chat_id: int, now: Optional[float] = None
+    ) -> Optional[str]:
         """Return ``None`` when allowed, else a short reason for the logs."""
 
         moment = time.monotonic() if now is None else now
@@ -68,19 +78,25 @@ class RateLimiter:
                 f"{self._per_user_seconds}s cooldown"
             )
 
-        while self._chat_hits and moment - self._chat_hits[0] >= 3600:
-            self._chat_hits.popleft()
-        if len(self._chat_hits) >= self._per_chat_hourly:
-            return f"chat hit the {self._per_chat_hourly}/hour cap"
+        hits = self._chat_hits.get(chat_id)
+        if hits is not None:
+            while hits and moment - hits[0] >= 3600:
+                hits.popleft()
+            if len(hits) >= self._per_chat_hourly:
+                return (
+                    f"chat {chat_id} hit the {self._per_chat_hourly}/hour cap"
+                )
 
         return None
 
-    def record(self, user_id: int, now: Optional[float] = None) -> None:
+    def record(
+        self, user_id: int, chat_id: int, now: Optional[float] = None
+    ) -> None:
         """Record an answered question against both limits."""
 
         moment = time.monotonic() if now is None else now
         self._last_by_user[user_id] = moment
-        self._chat_hits.append(moment)
+        self._chat_hits.setdefault(chat_id, deque()).append(moment)
 
 
 def extract_question(message, bot_username: str) -> str:
@@ -219,19 +235,42 @@ class MentionHandler:
         if user is None or user.is_bot:
             return
 
-        # Gate 1: the target group only. Private chats and any other group the
-        # bot is added to get nothing at all.
-        target = self._settings.target_chat_id
-        if target is None or message.chat_id != target:
-            return
+        # Gate 1: which chats are allowed at all.
+        #   * private  -> ADMIN_IDS only, so the assistant can be tried out
+        #     before the club sees it. No @mention needed: in a one-to-one
+        #     chat, making someone tag the bot would be absurd.
+        #   * the club group -> everyone, but only while the group switch is
+        #     on, and only when the bot is actually addressed.
+        #   * anything else -> silence.
+        chat = update.effective_chat
+        is_private = getattr(chat, "type", None) == ChatType.PRIVATE
+        if is_private:
+            if not self._settings.is_admin(user.id):
+                return
+            require_mention = False
+        else:
+            target = self._settings.target_chat_id
+            if target is None or message.chat_id != target:
+                return
+            if not self._settings.assistant_group_enabled:
+                # debug, not info: this fires on every group message while the
+                # switch is off, and must not drown the log.
+                logger.debug(
+                    "Assistant: group answering is off; ignoring message."
+                )
+                return
+            require_mention = True
 
-        # Gate 2: only when actually addressed.
         bot_username = (context.bot.username or "").lstrip("@")
-        if not bot_username:
-            logger.warning("Assistant: bot username unknown; ignoring mention.")
-            return
-        if not is_addressed_to_bot(message, context.bot.id, bot_username):
-            return
+        if require_mention:
+            # Gate 2: only when actually addressed.
+            if not bot_username:
+                logger.warning(
+                    "Assistant: bot username unknown; ignoring mention."
+                )
+                return
+            if not is_addressed_to_bot(message, context.bot.id, bot_username):
+                return
 
         question = extract_question(message, bot_username)
         if len(question) < MIN_QUESTION_CHARS:
@@ -248,7 +287,7 @@ class MentionHandler:
 
         # Gate 3: rate limits. Silent — announcing them would be the spam the
         # rest of this bot works to avoid.
-        reason = self._limiter.check(user.id)
+        reason = self._limiter.check(user.id, message.chat_id)
         if reason is not None:
             logger.info("Assistant: skipping question — %s.", reason)
             return
@@ -272,7 +311,7 @@ class MentionHandler:
 
         # Count it only once an answer actually exists, so a failed call does
         # not eat the member's cooldown.
-        self._limiter.record(user.id)
+        self._limiter.record(user.id, message.chat_id)
 
         try:
             await message.reply_text(answer)

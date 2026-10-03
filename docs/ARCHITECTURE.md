@@ -636,13 +636,15 @@ Historical `streak_bonus` rows are **left in the sheet** as a record but are **s
 
 Answers a member's question when they @mention the bot, or reply to one of its messages, in `TARGET_CHAT_ID`.
 
+**Chats:** the club group (everyone, `@mention` required, gated by `ASSISTANT_GROUP_ENABLED`) and a private chat with an `ADMIN_IDS` member (no mention needed — demanding a tag in a one-to-one chat would be absurd). Everything else is silent.
+
 **Why a `filters.TEXT` handler is safe here:** the bot already receives every message in the group — that is how `MessageHandler(filters.PHOTO, ...)` sees screenshots at all — so privacy mode is off. The filter is only a cheap pre-screen; the handler enforces the real gates in order: target chat → addressed to the bot → question length → rate limits. Every rejection is **silent and logged**, never announced.
 
 **The system prompt is generated** by `build_system_prompt()` from `bot.utils.points` (`ACTIVITY_MIN_MINUTES`, `BONUS_ACTIVITY_POINTS`, `STANDARD_POINTS_PER_WEEK`, `MIN_PLAN`/`MAX_PLAN`, `OVERACHIEVEMENT_RATE`). Change a threshold and the assistant's answer changes with it — the same anti-drift reasoning as the generated `Commands` worksheet. ~750 tokens.
 
 **Per-question context** is gathered best-effort by `_personal_context()`: the asker's plan, their points this week, and their team in the active round. Each read is independently guarded — a partial context beats refusing to answer. A coach gets an explicit note that coaches are not scored, so the model does not imply they have been idle.
 
-**Rate limiting** (`RateLimiter`) is in-memory: a per-user cooldown plus a rolling per-chat hourly deque. A restart clears it, which is acceptable for a spend guard and keeps chat traffic out of the sheet. The limit is recorded only after an answer exists, so a failed API call does not consume the member's cooldown.
+**Rate limiting** (`RateLimiter`) is in-memory: a per-user cooldown plus a rolling hourly deque **keyed by chat id** — with two chats allowed, one shared counter would let admin testing silently consume the group's budget. A restart clears it, which is acceptable for a spend guard and keeps chat traffic out of the sheet. The limit is recorded only after an answer exists, so a failed API call does not consume the member's cooldown.
 
 **Request shape:** no `temperature` (Sonnet 5.5 rejects a non-default value) and no `output_config` (it would fail against an older installed SDK; answers are short enough that the default effort is affordable). Every API failure degrades to `None` and the bot stays quiet rather than posting an error into the group.
 
@@ -794,6 +796,7 @@ With no active round `aggregate_teams()` returns no entries and nothing is poste
 | `SEASON_START_DATE` | no | ISO date `YYYY-MM-DD` (default `2026-07-12`). Points and the leaderboard count **only** submissions dated **on or after** this date; earlier submissions are ignored so the season restarts everyone at zero without deleting registrations or coach-assigned plans (see Section 5). Parsed into `Settings.season_start_date` (a `datetime.date`); an invalid value fails fast at startup. |
 | `LATE_SUBMISSION_GRACE_UNTIL_HOUR` | no | Integer hour `0`–`23` (default `9`). The **Monday** hour (local `TIMEZONE`) until which a workout dated in the **just-finished** Mon–Sun week is still accepted and scored — the default `9` matches the Mon 09:00/09:05 leaderboards. The row keeps its **real** `workout_date`, so it counts toward the week being reported (see Section 5). Set to `0` to **disable** the grace period (strict current-week-only). Parsed into `Settings.late_submission_grace_until_hour`; a non-integer or out-of-range value raises `ConfigError` at startup, like `SEASON_START_DATE`. |
 | `ASSISTANT_ENABLED` | no | Whether the bot answers @mentions (default on). Any of `0/false/no/off` disables it; anything else leaves it on, so a typo cannot silently kill the feature. The handler is not registered at all when off, or when `TARGET_CHAT_ID` is unset. |
+| `ASSISTANT_GROUP_ENABLED` | no | Whether the assistant answers in the GROUP (default on; same false/0/no/off parsing as `ASSISTANT_ENABLED`). Off is a testing mode: `ADMIN_IDS` still get answers in a private chat with the bot, so the feature can be exercised before the club sees it. |
 | `ASSISTANT_MODEL` | no | Model for the in-chat assistant, separate from `ANTHROPIC_MODEL` (vision). Default `claude-sonnet-5-5`. |
 | `ASSISTANT_USER_COOLDOWN_SECONDS` | no | Per-member cooldown between answered questions (default 10). |
 | `ASSISTANT_CHAT_HOURLY_LIMIT` | no | Rolling cap on answers per hour for the whole chat (default 15). |

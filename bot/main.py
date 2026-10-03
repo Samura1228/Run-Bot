@@ -102,10 +102,11 @@ def build_application(settings: Settings) -> Application:
         )
         logger.info(
             "Assistant enabled (model=%s, %ds per-user cooldown, %d/hour per "
-            "chat).",
+            "chat); group answering is %s, admin DMs always on.",
             settings.assistant_model,
             settings.assistant_user_cooldown_seconds,
             settings.assistant_chat_hourly_limit,
+            "ON" if settings.assistant_group_enabled else "OFF (testing mode)",
         )
     elif not settings.assistant_enabled:
         logger.info("ASSISTANT_ENABLED is off — @mentions are not answered.")

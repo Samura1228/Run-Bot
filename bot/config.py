@@ -93,6 +93,11 @@ class Settings(BaseModel):
     # Model for the assistant, separate from the vision model: the two have
     # very different jobs and are worth tuning apart.
     assistant_model: str = "claude-sonnet-5-5"
+    # Whether the assistant answers in the GROUP. Off = testing mode: it still
+    # answers ADMIN_IDS in a private chat, so the feature can be tried out
+    # before the whole club sees it. Defaults to on so a deploy never silently
+    # switches off something that was already live.
+    assistant_group_enabled: bool = True
     # Per-member cooldown and a rolling per-chat hourly cap. Every answer is a
     # paid API call plus a few sheet reads, and a group can chatter.
     assistant_user_cooldown_seconds: int = Field(default=10, ge=0)
@@ -306,6 +311,11 @@ def load_settings() -> Settings:
         }
     if os.environ.get("ASSISTANT_MODEL"):
         kwargs["assistant_model"] = os.environ["ASSISTANT_MODEL"].strip()
+    raw_group = (os.environ.get("ASSISTANT_GROUP_ENABLED") or "").strip().lower()
+    if raw_group:
+        kwargs["assistant_group_enabled"] = raw_group not in {
+            "0", "false", "no", "off",
+        }
     for env_name, field in (
         ("ASSISTANT_USER_COOLDOWN_SECONDS", "assistant_user_cooldown_seconds"),
         ("ASSISTANT_CHAT_HOURLY_LIMIT", "assistant_chat_hourly_limit"),

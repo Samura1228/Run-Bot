@@ -620,8 +620,16 @@ on. So "сколько у меня баллов?" works.
   doesn't know and suggests asking the coach.
 - **No actions.** It cannot award points, set plans or change teams.
 
-**Where it works.** The club group only (`TARGET_CHAT_ID`). In a private chat,
-or any other group the bot is added to, it stays completely silent.
+**Where it works.** The club group (`TARGET_CHAT_ID`), plus a **private chat
+with whoever is in `ADMIN_IDS`** — there no `@mention` is needed, you just
+type. Any other group the bot is added to, and anyone else's private chat, get
+nothing at all.
+
+**Testing before the club sees it.** Set `ASSISTANT_GROUP_ENABLED=false` in
+Railway: the bot stops answering in the group but keeps answering you in
+private, so you can try questions out in peace. Set it back to `true` to open
+it up. No deploy either way, and the two chats have separate hourly budgets so
+your testing never eats the group's.
 
 **Limits.** One question per person every 10 seconds, and 15 per hour across
 the chat. Over the limit it simply doesn't answer — announcing the limit would
