@@ -159,6 +159,9 @@ COMMANDS_REFERENCE: tuple[tuple[str, str, str], ...] = (
         "your team). It will not answer health or injury questions, and it "
         "never invents a rule — if it does not know, it says so. Limits: one "
         "question per person every 10 seconds, 15 per hour in the chat. It "
+        "It also has transcripts of the coach's voice messages and will "
+        "point you at the right recording and minute when the answer is "
+        "there. It "
         "stays silent in any other group; in a private chat it answers only "
         "the bot admin, which is how the feature gets tested before the club "
         "sees it.",

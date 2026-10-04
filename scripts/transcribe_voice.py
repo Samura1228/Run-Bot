@@ -12,7 +12,7 @@ timestamp, the sender and the duration — so there is no need to re-export.
 Usage
 -----
     .venv/bin/python scripts/transcribe_voice.py --export "<export dir>" \
-        --sender Aliaksandra --out voice_transcripts.json
+        --sender Aliaksandra
 
 The result is written to a local JSON file, NOT to the sheet: the point is to
 read it and judge the transcription quality before anything is published. The
@@ -226,7 +226,7 @@ def main() -> int:
         default=None,
         help="only this sender's voice messages (e.g. the coach's name)",
     )
-    parser.add_argument("--out", default="voice_transcripts.json")
+    parser.add_argument("--out", default="bot/data/voice_transcripts.json")
     parser.add_argument(
         "--model",
         default="medium",

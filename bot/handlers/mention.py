@@ -33,8 +33,9 @@ from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
 from bot.config import Settings
-from bot.services.assistant import ClaudeAssistantService
+from bot.services.assistant import CITE_RE, ClaudeAssistantService
 from bot.services.sheets import SheetsService
+from bot.services.voice import VoiceArchive
 from bot.utils.dates import current_week_bounds
 from bot.utils.points import format_points
 
@@ -153,10 +154,12 @@ class MentionHandler:
         settings: Settings,
         assistant: ClaudeAssistantService,
         sheets: SheetsService,
+        voice: Optional[VoiceArchive] = None,
     ) -> None:
         self._settings = settings
         self._assistant = assistant
         self._sheets = sheets
+        self._voice = voice
         self._limiter = RateLimiter(
             per_user_seconds=settings.assistant_user_cooldown_seconds,
             per_chat_hourly=settings.assistant_chat_hourly_limit,
@@ -222,6 +225,48 @@ class MentionHandler:
             lines.append("No team round is running right now.")
 
         return "\n".join(lines)
+
+    async def _send(self, context, message, answer: str, cite) -> None:
+        """Send the answer, replying to the cited voice message when there is one.
+
+        Replying to the original recording is the whole point of the citation:
+        the quote appears above the answer and tapping it jumps to that voice
+        note. But the message may be older than the bot, deleted, or carry an
+        id Telegram will not accept — so a rejected reply falls back to the
+        same text with the date and minute written out, which is still useful.
+        """
+
+        target_id = None
+        suffix = ""
+        if cite is not None and self._voice is not None:
+            voice_id = int(cite.group(1))
+            stamp = cite.group(2)
+            entry = self._voice.get(voice_id)
+            if entry is not None:
+                target_id = voice_id
+                suffix = f"\n\n🎧 Голосовое от {entry.get('date','')}, с {stamp}"
+
+        if target_id is not None:
+            try:
+                await context.bot.send_message(
+                    chat_id=message.chat_id,
+                    text=answer + suffix,
+                    reply_to_message_id=target_id,
+                )
+                return
+            except TelegramError as exc:
+                # Expected for a message Telegram will not let us reply to.
+                logger.info(
+                    "Assistant: could not reply to voice %s (%s); "
+                    "sending plain text instead.",
+                    target_id,
+                    exc,
+                )
+
+        try:
+            await message.reply_text(answer + suffix)
+        except TelegramError as exc:
+            logger.error("Assistant: failed to send the answer: %s", exc)
 
     async def __call__(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -304,19 +349,45 @@ class MentionHandler:
             pass  # cosmetic only
 
         note = await self._personal_context(user.id, name)
-        answer = await self._assistant.answer(question, note)
-        if answer is None:
+        result = await self._assistant.answer(question, note)
+        if result is None:
             # Already logged. Stay quiet rather than posting an error.
+            return
+
+        # The model may ask for the coach's actual words before answering.
+        # Only questions that need the archive pay for this second call.
+        if result.needs_voice and self._voice is not None:
+            logger.info(
+                "Assistant: fetching voice transcripts %s.",
+                list(result.needs_voice),
+            )
+            transcripts = self._voice.transcript_for(list(result.needs_voice))
+            if transcripts:
+                result = await self._assistant.answer(
+                    question, note, transcripts=transcripts
+                )
+                if result is None:
+                    return
+        if result.needs_voice and not result.text:
+            # It asked for transcripts we could not supply; nothing to send.
+            logger.warning(
+                "Assistant asked for voice %s but no archive is loaded.",
+                list(result.needs_voice),
+            )
+            return
+
+        answer = result.text
+        # Pull the citation tag off the end: it is machinery, not prose.
+        cite = CITE_RE.search(answer)
+        answer = CITE_RE.sub("", answer).strip()
+        if not answer:
             return
 
         # Count it only once an answer actually exists, so a failed call does
         # not eat the member's cooldown.
         self._limiter.record(user.id, message.chat_id)
 
-        try:
-            await message.reply_text(answer)
-        except TelegramError as exc:
-            logger.error("Assistant: failed to send the answer: %s", exc)
+        await self._send(context, message, answer, cite)
 
         logger.info(
             "Assistant answered %s (%d chars in, %d out).",

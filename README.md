@@ -611,6 +611,22 @@ never quote a threshold the bot no longer enforces. It also sees **your own
 data**: your weekly plan, your points so far this week, and which team you are
 on. So "сколько у меня баллов?" works.
 
+**The coach's voice messages.** The bot has transcripts of the coach's voice
+notes (29 recordings, ~1h 53m), so questions the coach answered out loud are
+answered too — and the bot **replies to the original recording** with the
+minute to start from:
+
+```
+@runcy_bot какой должен быть каденс?
+→ Начинать стоит с метронома на 160, а не сразу с 180...
+  🎧 Голосовое от 2025-09-19, с 0:00     [в ответ на то самое голосовое]
+```
+
+It only fetches a transcript when the question actually needs one, so ordinary
+rules questions still cost a single API call. If Telegram will not let it
+reply to that old message, it sends the same answer with the date and minute
+written out instead.
+
 **What it will not do**
 
 - **No health advice.** Pain, injury, illness, medication, training while

@@ -648,6 +648,18 @@ Answers a member's question when they @mention the bot, or reply to one of its m
 
 **Request shape:** no `temperature` (Sonnet 5.5 rejects a non-default value) and no `output_config` (it would fail against an older installed SDK; answers are short enough that the default effort is affordable). Every API failure degrades to `None` and the bot stays quiet rather than posting an error into the group.
 
+### Voice archive (`bot/services/voice.py`, `scripts/transcribe_voice.py`)
+
+Transcripts of the coach's voice notes, shipped as `bot/data/voice_transcripts.json` (29 recordings, 121 timestamped chunks, ~330 KB) and loaded into memory at startup. Produced offline by `scripts/transcribe_voice.py` from a Telegram Desktop HTML export.
+
+**Why a bundled file and not a worksheet:** it is a static archive nobody edits, it would be read on every assistant question, and a Sheets round-trip per question buys nothing. The cost is that a correction needs a deploy.
+
+**Retrieval is done by the model, not by code.** A keyword search was built first and measured against 14 real questions and 5 nonsense ones: 9 of 14 found the right recording while "какая завтра погода" still returned hits. Russian is why — the coach says "cadence" in Latin script while members ask about "каденс", and suffix-chopping does not unify "боль"/"болит"/"боку". It was deleted.
+
+**The two-step protocol** keeps that free for most questions. The ~1.3k-token index (one line per recording) rides in every system prompt; the model answers directly from the club rules when it can, or emits `NEED_VOICE: <id>` alone, and only then does the handler fetch transcripts and ask a second time. So an archive question costs two calls and a rules question still costs one. The fetch is honoured only on the first pass, so the exchange cannot loop.
+
+**Citation.** The second answer ends with `[voice:<id>@<timestamp>]`, which `MentionHandler._send()` strips and turns into a real Telegram reply to that voice message, plus a readable "🎧 Голосовое от … с 7:20" line. A `TelegramError` (deleted message, unacceptable id) falls back to the same text without the reply — verified, along with the no-archive path.
+
 ## 6. Scheduling Design
 
 ### Coexistence with the PTB event loop

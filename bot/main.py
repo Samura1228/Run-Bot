@@ -33,6 +33,7 @@ from bot.handlers.errors import error_handler
 from bot.handlers.mention import MentionHandler
 from bot.handlers.photo import PhotoHandler
 from bot.services.assistant import ClaudeAssistantService
+from bot.services.voice import load_archive
 from bot.services.leaderboard import LeaderboardService
 from bot.services.scheduler import build_scheduler
 from bot.services.sheets import SheetsService
@@ -90,14 +91,18 @@ def build_application(settings: Settings) -> Application:
     # the bot receives every message in the group (that is how the photo
     # pipeline works at all).
     if settings.assistant_enabled and settings.target_chat_id is not None:
+        # Loaded once at startup; absent or unreadable simply means the
+        # assistant answers from the club's rules alone, as it did before.
+        voice = load_archive()
         assistant = ClaudeAssistantService(
             api_key=settings.anthropic_api_key,
             model=settings.assistant_model,
+            voice_index=voice.index_text() if voice else "",
         )
         application.add_handler(
             MessageHandler(
                 filters.TEXT & ~filters.COMMAND,
-                MentionHandler(settings, assistant, sheets),
+                MentionHandler(settings, assistant, sheets, voice),
             )
         )
         logger.info(
