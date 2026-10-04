@@ -6,8 +6,8 @@ Implements the plan-based points model:
   :data:`MAX_PLAN`, defaulting to :data:`DEFAULT_PLAN`.
 - Completing the plan yields ~:data:`STANDARD_POINTS_PER_WEEK` points/week: each
   workout up to the plan awards ``STANDARD_POINTS_PER_WEEK / plan`` points.
-- Workouts logged **beyond** the plan (overachievement) award the base rate
-  times :data:`OVERACHIEVEMENT_RATE` (50%).
+- Workouts logged **beyond** the plan award NOTHING: the plan is the target,
+  and finishing it is what the week is scored on.
 
 ``ACTIVITY_POINTS`` / :func:`resolve_points` are retained only so the photo
 handler can gate which activity types are awardable at all (running only); the
@@ -22,7 +22,11 @@ STANDARD_POINTS_PER_WEEK = 30
 MIN_PLAN = 2
 MAX_PLAN = 6
 DEFAULT_PLAN = 3
-OVERACHIEVEMENT_RATE = 0.5
+# What a run beyond the plan is worth, as a share of the base rate. Zero: the
+# plan is the goal, and extra runs are not paid for. Kept as a constant rather
+# than deleting the branch so the rule stays one obvious number to change, and
+# so the assistant's prompt can be generated from it.
+OVERACHIEVEMENT_RATE = 0.0
 
 # --- Bonus (non-running) activity model ----------------------------------- #
 # Walking / cycling / strength are SEPARATE bonus points: they award a flat
@@ -91,10 +95,11 @@ def workout_points(plan: int, workouts_this_week_so_far: int) -> float:
             ALREADY logged in the current week BEFORE this one.
 
     The base rate is ``STANDARD_POINTS_PER_WEEK / plan``. Workouts within the
-    plan earn the base rate; workouts beyond the plan earn the base rate times
-    :data:`OVERACHIEVEMENT_RATE`. The result is an EXACT fractional value
-    (e.g. plan 4 → 7.5), rounded only to 2 decimals to avoid float noise —
-    it is NOT rounded to an integer.
+    plan earn the base rate; workouts beyond it earn the base rate times
+    :data:`OVERACHIEVEMENT_RATE`, which is ``0.0`` — so an extra run returns
+    0.0 and the caller must say so rather than reporting "+0 points". The
+    result is an EXACT fractional value (e.g. plan 4 → 7.5), rounded only to
+    2 decimals to avoid float noise — it is NOT rounded to an integer.
     """
 
     base_rate = STANDARD_POINTS_PER_WEEK / plan

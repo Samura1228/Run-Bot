@@ -112,7 +112,7 @@ run-bot/
 | [`bot/services/leaderboard.py`](bot/services/leaderboard.py) | Aggregate points per user for a date range; format weekly/monthly messages. |
 | [`bot/utils/dates.py`](bot/utils/dates.py) | Compute current/previous Mon–Sun week and previous calendar month in Europe/Nicosia, plus the accepted-submission window (`accepted_workout_window()`) and the week containing a given date (`week_bounds_containing()`). |
 | [`bot/utils/hashing.py`](bot/utils/hashing.py) | Deterministic image byte hashing for dedup. |
-| [`bot/utils/points.py`](bot/utils/points.py) | Plan-based points model: constants, `workout_points()` (base + overachievement); the `ACTIVITY_POINTS` mapping now only gates awardable activity types (running). |
+| [`bot/utils/points.py`](bot/utils/points.py) | Plan-based points model: constants, `workout_points()` (base rate; zero beyond the plan); the `ACTIVITY_POINTS` mapping now only gates awardable activity types (running). |
 
 ---
 
@@ -440,7 +440,7 @@ Constants live in [`bot/utils/points.py`](bot/utils/points.py):
 | `STANDARD_POINTS_PER_WEEK` | 30 | Points for completing the plan. |
 | `MIN_PLAN` / `MAX_PLAN` | 2 / 6 | Allowed plan range. |
 | `DEFAULT_PLAN` | 3 | Plan used when a user has no `Plans` row. |
-| `OVERACHIEVEMENT_RATE` | 0.5 | Multiplier for workouts logged **beyond** the plan. |
+| `OVERACHIEVEMENT_RATE` | 0.0 | Share of the base rate a run **beyond** the plan earns — zero. Kept as a constant rather than deleting the branch so the rule is one obvious number to change. |
 
 **Per-workout points** (`workout_points(plan, workouts_this_week_so_far)`):
 
@@ -448,7 +448,7 @@ Constants live in [`bot/utils/points.py`](bot/utils/points.py):
 base_rate = STANDARD_POINTS_PER_WEEK / plan
 if workouts_this_week_so_far < plan:   # within plan
     pts = base_rate
-else:                                   # overachievement
+else:                                   # beyond the plan -> 0.0
     pts = base_rate * OVERACHIEVEMENT_RATE
 return round(pts, 2)                     # EXACT fraction (2-dp), NOT rounded to int
 ```

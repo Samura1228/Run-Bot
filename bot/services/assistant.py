@@ -26,7 +26,6 @@ from bot.utils.points import (
     DEFAULT_PLAN,
     MAX_PLAN,
     MIN_PLAN,
-    OVERACHIEVEMENT_RATE,
     STANDARD_POINTS_PER_WEEK,
 )
 
@@ -72,7 +71,6 @@ def build_system_prompt(voice_index: str = "") -> str:
     walking = ACTIVITY_MIN_MINUTES["walking"]
     cycling = ACTIVITY_MIN_MINUTES["cycling"]
     strength = ACTIVITY_MIN_MINUTES["strength"]
-    over = int(OVERACHIEVEMENT_RATE * 100)
 
     base = f"""You are the assistant of a running club's Telegram bot. Members \
 @mention you in the group with short questions about how the club works.
@@ -96,7 +94,9 @@ Running — plan-based points
 - Completing the plan is worth about {STANDARD_POINTS_PER_WEEK} points a week:
   each run inside the plan earns {STANDARD_POINTS_PER_WEEK} divided by the plan.
   Plan {DEFAULT_PLAN} -> 10 points per run; plan 4 -> 7.5; plan 6 -> 5.
-- Runs BEYOND the plan in the same week still count, at {over}% of that rate.
+- Runs BEYOND the plan in the same week earn NOTHING. The plan is the target;
+  an extra run is welcome but is not paid for. Someone who wants more points
+  per week should ask the coach to raise their plan.
 
 Other activities — a flat {BONUS_ACTIVITY_POINTS} points once a minimum
 duration is met

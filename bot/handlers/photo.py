@@ -16,6 +16,7 @@ REAL ``workout_date`` and is scored against the week that date belongs to.
 On a successful, eligible run the row is written to the Google Sheet FIRST; once
 the write is confirmed and the INFO log is emitted, the bot replies to the chat
 with "✅ Nice run, {name}! +{points} points. //total week = {total} points"
+(or, past the weekly plan, a note that the run earns nothing)
 — the trailing total being the user's points for the week that workout belongs
 to, read back after the write so it includes the points just awarded.
 
@@ -450,7 +451,18 @@ class PhotoHandler:
                 workouts_so_far = 0
 
             points = workout_points(plan, workouts_so_far)
-            reply_text = f"✅ Nice run, {who}! +{format_points(points)} points."
+            if points > 0:
+                reply_text = (
+                    f"✅ Nice run, {who}! +{format_points(points)} points."
+                )
+            else:
+                # Beyond the plan. Still logged (see below) so the screenshot
+                # cannot be re-submitted and the week's run count stays right,
+                # but "+0 points" would read like a bug — say what happened.
+                reply_text = (
+                    f"✅ Nice run, {who}! You've already completed your plan "
+                    f"of {plan} this week, so this one earns no points."
+                )
         else:
             # BONUS ACTIVITY (walking/cycling/strength): flat points once the
             # per-activity minimum duration is met. These are SEPARATE bonus

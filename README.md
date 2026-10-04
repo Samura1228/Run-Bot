@@ -675,8 +675,11 @@ workouts/week they aim for — and points scale to that plan.
   | 5 | 6 | 3 |
   | 6 | 5 | 2.5 |
 
-- **Overachievement:** workouts logged **beyond** your plan in the same week
-  still count, at **50%** of the base rate (also an exact fraction).
+- **Beyond the plan: no points.** Extra runs in the same week earn **nothing** —
+  the plan is the target, and finishing it is what the week is scored on. The
+  run is still logged (so the screenshot can't be re-submitted and the week's
+  run count stays right) and the bot says plainly that it earned no points.
+  Want more points per week? Ask the coach to raise your plan.
 - **No streak bonus.** The weekly streak bonus was removed. Old `streak_bonus`
   rows stay in the sheet as history but **no longer count** toward any
   leaderboard. Changing your plan applies **going forward only** —
@@ -687,7 +690,7 @@ workouts/week they aim for — and points scale to that plan.
 Besides running, three **bonus** activities each earn a flat **5 points** once a
 minimum duration is met. They count in the weekly/monthly leaderboards but are
 **separate** from the running plan — they do **not** affect your plan progress,
-or overachievement (those stay running-only).
+or the plan (those stay running-only).
 
 | Activity | Minimum duration | Points | Success reply | Below-minimum reply |
 |----------|:----------------:|:------:|---------------|---------------------|
