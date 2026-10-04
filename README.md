@@ -629,9 +629,11 @@ written out instead.
 
 **What it will not do**
 
-- **No health advice.** Pain, injury, illness, medication, training while
-  unwell — it declines and points you at a doctor or the coach. This is
-  deliberate and it holds even if you insist.
+- **No health advice.** Your own injury, illness, medication or training
+  while unwell — it declines and points you at a doctor or the coach, even if
+  you insist. The one exception is a general running topic the coach recorded
+  (a side stitch, крепатура, stretching): there it relays **her** words,
+  attributed, and still says to see a doctor if it's serious.
 - **No invented rules.** If the answer isn't in what it was given, it says it
   doesn't know and suggests asking the coach.
 - **No actions.** It cannot award points, set plans or change teams.
