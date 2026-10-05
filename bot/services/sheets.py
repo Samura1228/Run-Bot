@@ -153,8 +153,9 @@ COMMANDS_REFERENCE: tuple[tuple[str, str, str], ...] = (
     (
         "@<the bot> <question>",
         "everyone, in the club group only",
-        "Ask the bot a question — mention it, or reply to one of its messages, "
-        "e.g. '@bot how long do I have to cycle for points?'. It answers from "
+        "Ask the bot a question by MENTIONING it, e.g. '@bot how long do I "
+        "have to cycle for points?'. Replying to one of its messages does not "
+        "count. It answers from "
         "the club's rules and your own data (your plan, your points this week, "
         "your team). It will not answer health or injury questions, and it "
         "never invents a rule — if it does not know, it says so. Limits: one "

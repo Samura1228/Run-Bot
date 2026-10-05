@@ -638,6 +638,8 @@ Answers a member's question when they @mention the bot, or reply to one of its m
 
 **Chats:** the club group (everyone, `@mention` required, gated by `ASSISTANT_GROUP_ENABLED`) and a private chat with an `ADMIN_IDS` member (no mention needed — demanding a tag in a one-to-one chat would be absurd). Everything else is silent.
 
+**A reply to the bot is not an address.** It was, briefly, as a convenience for follow-ups. In production that backfired immediately: the bot replies to every workout screenshot and posts the boards, so the group is thick with its messages, and members replying to those got unsolicited answers. The @mention is now the only trigger in the group.
+
 **Why a `filters.TEXT` handler is safe here:** the bot already receives every message in the group — that is how `MessageHandler(filters.PHOTO, ...)` sees screenshots at all — so privacy mode is off. The filter is only a cheap pre-screen; the handler enforces the real gates in order: target chat → addressed to the bot → question length → rate limits. Every rejection is **silent and logged**, never announced.
 
 **The system prompt is generated** by `build_system_prompt()` from `bot.utils.points` (`ACTIVITY_MIN_MINUTES`, `BONUS_ACTIVITY_POINTS`, `STANDARD_POINTS_PER_WEEK`, `MIN_PLAN`/`MAX_PLAN`, `OVERACHIEVEMENT_RATE`). Change a threshold and the assistant's answer changes with it — the same anti-drift reasoning as the generated `Commands` worksheet. ~750 tokens.

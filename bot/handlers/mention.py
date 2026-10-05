@@ -9,8 +9,9 @@ messages) in the target group. Deliberately narrow:
   tested before the whole club sees it. The bot already receives every message
   in the group (that is how the photo pipeline works), so without this gate it
   would answer anywhere.
-* **Only when addressed** — in the group. In a one-to-one chat with the admin
-  no @mention is needed.
+* **Only when @mentioned** — in the group. Replying to one of the bot's own
+  messages does not count (see :func:`is_addressed_to_bot`). In a one-to-one
+  chat with the admin no @mention is needed.
 * **The group can be switched off** (``ASSISTANT_GROUP_ENABLED``) while the
   admin's private chat keeps working.
 * **Rate limited** per member and per chat, because every answer costs an API
@@ -126,14 +127,16 @@ def extract_question(message, bot_username: str) -> str:
     return " ".join(text.split())
 
 
-def is_addressed_to_bot(message, bot_id: int, bot_username: str) -> bool:
-    """True when the message @mentions the bot or replies to one of its posts."""
+def is_addressed_to_bot(message, bot_username: str) -> bool:
+    """True only when the message @mentions the bot.
 
-    reply = getattr(message, "reply_to_message", None)
-    if reply is not None:
-        author = getattr(reply, "from_user", None)
-        if author is not None and author.id == bot_id:
-            return True
+    Replying to one of the bot's messages deliberately does NOT count. It used
+    to, as a convenience for follow-up questions, and it was a mistake: the
+    bot answers every workout screenshot with "✅ Nice run…" and posts the
+    leaderboards, so the group is full of its messages. People replied to
+    those with "молодец!" and got an assistant answer they never asked for.
+    An @mention is the only unambiguous way to address it.
+    """
 
     text = message.text or ""
     target = f"@{bot_username}".lower()
@@ -314,7 +317,7 @@ class MentionHandler:
                     "Assistant: bot username unknown; ignoring mention."
                 )
                 return
-            if not is_addressed_to_bot(message, context.bot.id, bot_username):
+            if not is_addressed_to_bot(message, bot_username):
                 return
 
         question = extract_question(message, bot_username)

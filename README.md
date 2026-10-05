@@ -602,8 +602,10 @@ Mention the bot in the club group with a question and it answers:
 → Минимум 60 минут, тогда начисляется 5 баллов.
 ```
 
-Replying to one of the bot's own messages works too. It answers in the
-language you asked in.
+**Only an @mention counts.** Replying to one of the bot's own messages does
+not — it answers every workout screenshot and posts the leaderboards, so the
+group is full of its messages and people replying "молодец!" to those were
+getting answers they never asked for. It answers in the language you asked in.
 
 **What it knows.** The club's rules — and crucially, the rules section of its
 prompt is **generated from the same constants that score workouts**, so it can
