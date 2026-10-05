@@ -38,6 +38,12 @@ ACTIVITY_MIN_MINUTES = {"walking": 40, "cycling": 60, "strength": 15}
 # The set of bonus activity types (walking, cycling, strength).
 BONUS_ACTIVITIES = set(ACTIVITY_MIN_MINUTES.keys())
 
+# How many of an activity one person may SUBMIT per calendar day. Counted by
+# submission day, not by the workout's own date, so yesterday's walk can still
+# be sent today — it just uses up one of today's slots. Activities absent from
+# this mapping are unlimited (running has the weekly plan instead).
+MAX_DAILY_SUBMISSIONS = {"walking": 2}
+
 # Friendly labels used in the ✅ success reply for each activity type.
 _ACTIVITY_LABELS = {
     "running": "run",

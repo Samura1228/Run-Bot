@@ -697,6 +697,8 @@ or the plan (those stay running-only).
 | Activity | Minimum duration | Points | Success reply | Below-minimum reply |
 |----------|:----------------:|:------:|---------------|---------------------|
 | Walking | **40 min** | 5 | `✅ Nice walk, {name}! +5 points. //total week = {total} points` | `⚠️ Walk is {dur} min — minimum is 40 min to earn points.` |
+
+> **At most 2 walks a day earn points**, counted by the day the screenshot is **sent**. A third walk posted the same day gets `⚠️ Only 2 walks a day earn points — this is your 3rd today, so no points for it.` and is not logged at all. Sending yesterday's walk today is fine — it just uses one of today's two slots. Cycling and strength have no daily limit.
 | Cycling | **60 min** | 5 | `✅ Nice ride, {name}! +5 points. //total week = {total} points` | `⚠️ Ride is {dur} min — minimum is 60 min to earn points.` |
 | Strength/stretch | **15 min** | 5 | `✅ Nice strength session, {name}! +5 points. //total week = {total} points` | `⚠️ Strength/stretch is {dur} min — minimum is 15 min to earn points.` |
 

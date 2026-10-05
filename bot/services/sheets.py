@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import date, datetime, timezone
+from zoneinfo import ZoneInfo
 from typing import TYPE_CHECKING, Any, Optional, Sequence
 
 import gspread
@@ -77,6 +78,7 @@ HEADER_ROW = [
 ]
 
 # Column indices (0-based) for reads.
+_COL_TIMESTAMP = 0
 _COL_USER_ID = 1
 _COL_USERNAME = 2
 _COL_DISPLAY_NAME = 3
@@ -953,6 +955,44 @@ class SheetsService:
             streak,
             label=f"set_plan user={user_id}",
         )
+
+    async def count_user_submissions_on_day(
+        self, user_id: int, activity_type: str, local_day: date, tz: str
+    ) -> int:
+        """Count rows the user SUBMITTED on a given local calendar day.
+
+        Keyed on the ``timestamp`` column (when the row was written), not
+        ``workout_date`` — this backs the per-day submission cap, which is
+        deliberately about how much someone posts in a day rather than when
+        they trained. The stored timestamp is UTC, so it is converted to
+        ``tz`` before the date is taken; otherwise a walk posted at 01:00
+        local time would be counted against the previous day.
+
+        Rows with an unparseable timestamp are skipped: an old or hand-edited
+        row must not make the cap reject a legitimate submission.
+        """
+
+        rows = await asyncio.to_thread(self._read_all_records_sync)
+        user_id_str = str(user_id)
+        zone = ZoneInfo(tz)
+        count = 0
+
+        for row in rows[1:]:  # skip header
+            if len(row) <= _COL_POINTS:
+                continue
+            if row[_COL_USER_ID] != user_id_str:
+                continue
+            if row[_COL_ACTIVITY_TYPE] != activity_type:
+                continue
+            try:
+                stamp = datetime.strptime(
+                    row[_COL_TIMESTAMP].strip(), "%Y-%m-%dT%H:%M:%SZ"
+                ).replace(tzinfo=timezone.utc)
+            except (ValueError, IndexError):
+                continue
+            if stamp.astimezone(zone).date() == local_day:
+                count += 1
+        return count
 
     # ------------------------------------------------------------------ #
     # Members directory (hand-maintained name -> Telegram account)

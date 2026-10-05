@@ -440,6 +440,7 @@ Constants live in [`bot/utils/points.py`](bot/utils/points.py):
 | `STANDARD_POINTS_PER_WEEK` | 30 | Points for completing the plan. |
 | `MIN_PLAN` / `MAX_PLAN` | 2 / 6 | Allowed plan range. |
 | `DEFAULT_PLAN` | 3 | Plan used when a user has no `Plans` row. |
+| `MAX_DAILY_SUBMISSIONS` | `{"walking": 2}` | How many of an activity one person may SUBMIT per calendar day, counted from the `timestamp` column (when the row was written) converted to `TIMEZONE` — not from `workout_date`. The cap is about how much someone posts in a day, so yesterday's walk may still be sent today and uses one of today's slots. An activity absent from the mapping is unlimited; running is governed by the weekly plan instead. Checked BEFORE the minimum-duration test so a capped member is told the real reason, and it fails OPEN on a Sheets error. |
 | `OVERACHIEVEMENT_RATE` | 0.0 | Share of the base rate a run **beyond** the plan earns — zero. Kept as a constant rather than deleting the branch so the rule is one obvious number to change. |
 
 **Per-workout points** (`workout_points(plan, workouts_this_week_so_far)`):

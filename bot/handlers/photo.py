@@ -68,6 +68,7 @@ from bot.utils.dates import (
 from bot.utils.hashing import compute_image_hash
 from bot.utils.points import (
     ACTIVITY_MIN_MINUTES,
+    MAX_DAILY_SUBMISSIONS,
     BONUS_ACTIVITIES,
     BONUS_ACTIVITY_POINTS,
     DEFAULT_PLAN,
@@ -481,6 +482,43 @@ class PhotoHandler:
                     user.id,
                 )
                 return
+
+            # Per-day submission cap, counted by the day the screenshot was
+            # SENT (not the workout's own date), so yesterday's walk can still
+            # be posted today — it just uses one of today's slots. Checked
+            # before the duration test so someone at the cap is told the real
+            # reason rather than being sent away over minutes.
+            daily_cap = MAX_DAILY_SUBMISSIONS.get(activity)
+            if daily_cap is not None:
+                today = self._submission_date(message)
+                try:
+                    already = await self._sheets.count_user_submissions_on_day(
+                        user.id, activity, today, self._settings.timezone
+                    )
+                except Exception as exc:
+                    # Fail OPEN: a Sheets hiccup must not refuse a legitimate
+                    # workout. The worst case is one extra walk counted.
+                    logger.error(
+                        "Daily-cap check failed for user %s; allowing: %s",
+                        user.id,
+                        exc,
+                    )
+                    already = 0
+                if already >= daily_cap:
+                    noun = _BELOW_MIN_NOUN[activity].lower()
+                    await _safe_reply(
+                        message,
+                        f"⚠️ Only {daily_cap} {noun}s a day earn points — "
+                        f"this is your {already + 1}{'rd' if already == 2 else 'th'} "
+                        f"today, so no points for it.",
+                    )
+                    logger.info(
+                        "User %s is at the daily %s cap (%d); not logged.",
+                        user.id,
+                        activity,
+                        daily_cap,
+                    )
+                    return
 
             minimum = ACTIVITY_MIN_MINUTES[activity]
             if dur < minimum:
