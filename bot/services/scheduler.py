@@ -179,12 +179,16 @@ async def run_team_board(
 
     try:
         await sheets.set_team_round_status(
-            current["round_id"], TEAMS_STATUS_POSTED
+            current["row_index"], TEAMS_STATUS_POSTED, label=current["round_id"]
         )
     except Exception as exc:
+        # Loud on purpose: if the status does not stick, this same board
+        # posts again tomorrow, and every morning after that.
         logger.error(
-            "Team round %s posted but could not be marked posted: %s",
+            "Team round %s (sheet row %s) POSTED BUT NOT MARKED — it will "
+            "repost tomorrow unless the status cell is set by hand: %s",
             current["round_id"],
+            current["row_index"],
             exc,
         )
 

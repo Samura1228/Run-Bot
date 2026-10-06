@@ -642,7 +642,9 @@ async def team_command(
                 await _safe_reply(message, _NO_ACTIVE_ROUND_MSG)
                 return
             await sheets.set_team_round_status(
-                current["round_id"], TEAMS_STATUS_CANCELLED
+                current["row_index"],
+                TEAMS_STATUS_CANCELLED,
+                label=current["round_id"],
             )
             logger.info(
                 "Team round %s cancelled by %s.", current["round_id"], caller.id
@@ -748,7 +750,9 @@ async def team_command(
         previous = await sheets.get_current_team_round()
         if previous is not None:
             await sheets.set_team_round_status(
-                previous["round_id"], TEAMS_STATUS_CANCELLED
+                previous["row_index"],
+                TEAMS_STATUS_CANCELLED,
+                label=previous["round_id"],
             )
             logger.info(
                 "Team: replacing active round %s.", previous["round_id"]

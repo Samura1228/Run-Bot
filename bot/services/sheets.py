@@ -1185,8 +1185,18 @@ class SheetsService:
                 )
         return resolved
 
-    def _parse_teams_row(self, row: list[str]) -> Optional[dict[str, Any]]:
-        """Parse one Teams row into a dict, or None when unusable."""
+    def _parse_teams_row(
+        self, row: list[str], row_index: int
+    ) -> Optional[dict[str, Any]]:
+        """Parse one Teams row into a dict, or None when unusable.
+
+        ``row_index`` is the 1-based sheet row and is carried through so the
+        status can later be written back by POSITION. Matching by round_id
+        looked fine until a round typed by hand left that cell blank: the id
+        below was synthesised, no cell ever held it, so marking the round
+        ``posted`` silently failed and the finished board reposted every
+        morning. The row number is the one identifier that always exists.
+        """
 
         if len(row) <= _TEAMS_COL_STATUS:
             return None
@@ -1200,8 +1210,10 @@ class SheetsService:
         if not teams:
             return None
         return {
-            # A row typed by hand may leave round_id blank; synthesise a stable
-            # one from the dates so the round can still be marked posted.
+            "row_index": row_index,
+            # A row typed by hand may leave round_id blank; synthesise a
+            # readable one from the dates for logs. It is NOT used to find the
+            # row again — see row_index above.
             "round_id": (
                 row[_TEAMS_COL_ROUND_ID].strip()
                 or f"manual-{start_date.isoformat()}-{end_date.isoformat()}"
@@ -1222,8 +1234,8 @@ class SheetsService:
 
         rows = await asyncio.to_thread(self._read_all_teams_sync)
         rounds: list[dict[str, Any]] = []
-        for row in rows[1:]:  # skip header
-            record = self._parse_teams_row(row)
+        for offset, row in enumerate(rows[1:], start=2):  # header is row 1
+            record = self._parse_teams_row(row, offset)
             if record is not None:
                 rounds.append(record)
         # Resolve names -> ids once per round (a no-op for id-only rows).
@@ -1274,31 +1286,32 @@ class SheetsService:
             label=f"create_team_round {round_id}",
         )
 
-    def _set_teams_status_sync(self, round_id: str, status: str) -> None:
-        worksheet = self._require_teams_worksheet()
-        rows = worksheet.get_all_values()
-        for offset, row in enumerate(rows[1:], start=2):  # header is row 1
-            if len(row) <= _TEAMS_COL_ROUND_ID:
-                continue
-            if row[_TEAMS_COL_ROUND_ID].strip() != round_id:
-                continue
-            column = chr(ord("A") + _TEAMS_COL_STATUS)
-            worksheet.update(
-                values=[[status]],
-                range_name=f"{column}{offset}",
-                value_input_option="RAW",
-            )
-            return
-        logger.warning("Teams: round %r not found; status not updated.", round_id)
+    def _set_teams_status_sync(self, row_index: int, status: str) -> None:
+        """Write a round's status by SHEET ROW, which always identifies it."""
 
-    async def set_team_round_status(self, round_id: str, status: str) -> None:
-        """Set a team round's status (``posted`` / ``cancelled``)."""
+        worksheet = self._require_teams_worksheet()
+        column = chr(ord("A") + _TEAMS_COL_STATUS)
+        worksheet.update(
+            values=[[status]],
+            range_name=f"{column}{row_index}",
+            value_input_option="RAW",
+        )
+
+    async def set_team_round_status(
+        self, row_index: int, status: str, label: str = ""
+    ) -> None:
+        """Set a team round's status (``posted`` / ``cancelled``) by row.
+
+        Takes the sheet row rather than the round id: a hand-typed round may
+        have no id at all, and failing to record ``posted`` makes a finished
+        board repost every single morning.
+        """
 
         await self._retry_blocking(
             self._set_teams_status_sync,
-            round_id,
+            row_index,
             status,
-            label=f"set_team_round_status {round_id}",
+            label=f"set_team_round_status row={row_index} {label}".strip(),
         )
 
     async def _retry_blocking(

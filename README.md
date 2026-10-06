@@ -528,7 +528,8 @@ Team 1=Алексей Б,Елена,Артём|Team 2=Марфа Ш,Анаста
 ```
 
 Names resolve through `Members` exactly as in the command, `round_id` may be
-left blank, and the bot picks the round up on its next 09:05 check. One
+left blank (the bot finds the row by position, not by that id), and the bot
+picks the round up on its next 09:05 check. One
 difference from the command: here an unknown name is **skipped with a warning
 in the logs** rather than refusing the round — the board posts unattended and
 must not be blocked by one typo. Check the line-up with `/team status` after
