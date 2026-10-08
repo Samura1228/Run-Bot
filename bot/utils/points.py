@@ -38,11 +38,13 @@ ACTIVITY_MIN_MINUTES = {"walking": 40, "cycling": 60, "strength": 15}
 # The set of bonus activity types (walking, cycling, strength).
 BONUS_ACTIVITIES = set(ACTIVITY_MIN_MINUTES.keys())
 
-# How many of an activity one person may SUBMIT per calendar day. Counted by
-# submission day, not by the workout's own date, so yesterday's walk can still
-# be sent today — it just uses up one of today's slots. Activities absent from
-# this mapping are unlimited (running has the weekly plan instead).
-MAX_DAILY_SUBMISSIONS = {"walking": 2}
+# How many of an activity one person may be paid for per DAY OF TRAINING.
+# Counted by the workout's own date, not by when the screenshot arrived: if
+# someone walks twice on Monday and twice on Tuesday but posts all four on
+# Tuesday, all four count. Forgetting to post on time is not the thing being
+# limited. Activities absent from this mapping are unlimited (running is
+# governed by the weekly plan instead).
+MAX_ACTIVITIES_PER_DAY = {"walking": 2}
 
 # Friendly labels used in the ✅ success reply for each activity type.
 _ACTIVITY_LABELS = {

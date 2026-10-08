@@ -68,7 +68,7 @@ from bot.utils.dates import (
 from bot.utils.hashing import compute_image_hash
 from bot.utils.points import (
     ACTIVITY_MIN_MINUTES,
-    MAX_DAILY_SUBMISSIONS,
+    MAX_ACTIVITIES_PER_DAY,
     BONUS_ACTIVITIES,
     BONUS_ACTIVITY_POINTS,
     DEFAULT_PLAN,
@@ -483,17 +483,17 @@ class PhotoHandler:
                 )
                 return
 
-            # Per-day submission cap, counted by the day the screenshot was
-            # SENT (not the workout's own date), so yesterday's walk can still
-            # be posted today — it just uses one of today's slots. Checked
-            # before the duration test so someone at the cap is told the real
-            # reason rather than being sent away over minutes.
-            daily_cap = MAX_DAILY_SUBMISSIONS.get(activity)
+            # Per-day cap, counted by the day the activity HAPPENED. Posting
+            # Monday's and Tuesday's walks together on Tuesday therefore
+            # scores all of them; only a third walk dated the same day is
+            # refused. Checked before the duration test so someone at the cap
+            # is told the real reason rather than being sent away over
+            # minutes.
+            daily_cap = MAX_ACTIVITIES_PER_DAY.get(activity)
             if daily_cap is not None:
-                today = self._submission_date(message)
                 try:
-                    already = await self._sheets.count_user_submissions_on_day(
-                        user.id, activity, today, self._settings.timezone
+                    already = await self._sheets.count_user_activity_on_date(
+                        user.id, activity, wdate
                     )
                 except Exception as exc:
                     # Fail OPEN: a Sheets hiccup must not refuse a legitimate
@@ -508,15 +508,17 @@ class PhotoHandler:
                     noun = _BELOW_MIN_NOUN[activity].lower()
                     await _safe_reply(
                         message,
-                        f"⚠️ Only {daily_cap} {noun}s a day earn points — "
-                        f"this is your {already + 1}{'rd' if already == 2 else 'th'} "
-                        f"today, so no points for it.",
+                        f"⚠️ Only {daily_cap} {noun}s a day earn points, and "
+                        f"you already have {already} for "
+                        f"{wdate.isoformat()} — this one earns nothing.",
                     )
                     logger.info(
-                        "User %s is at the daily %s cap (%d); not logged.",
+                        "User %s is at the %s cap for %s (%d already); "
+                        "not logged.",
                         user.id,
                         activity,
-                        daily_cap,
+                        wdate,
+                        already,
                     )
                     return
 

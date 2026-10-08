@@ -22,7 +22,7 @@ import anthropic
 
 from bot.utils.points import (
     ACTIVITY_MIN_MINUTES,
-    MAX_DAILY_SUBMISSIONS,
+    MAX_ACTIVITIES_PER_DAY,
     BONUS_ACTIVITY_POINTS,
     DEFAULT_PLAN,
     MAX_PLAN,
@@ -72,7 +72,7 @@ def build_system_prompt(voice_index: str = "") -> str:
     walking = ACTIVITY_MIN_MINUTES["walking"]
     cycling = ACTIVITY_MIN_MINUTES["cycling"]
     strength = ACTIVITY_MIN_MINUTES["strength"]
-    walk_cap = MAX_DAILY_SUBMISSIONS.get("walking", 0)
+    walk_cap = MAX_ACTIVITIES_PER_DAY.get("walking", 0)
 
     base = f"""You are the assistant of a running club's Telegram bot. Members \
 @mention you in the group with short questions about how the club works.
@@ -107,10 +107,10 @@ duration is met
 - Strength training, and also stretching, yoga, pilates and mobility work: at
   least {strength} minutes.
 - Below the minimum: no points, and the bot says so.
-- At most {walk_cap} walks per day earn points, counted by the day the
-  screenshot is SENT. A third walk posted the same day earns nothing. Sending
-  yesterday's walk today is fine — it just uses one of today's two slots.
-  Cycling and strength have no daily limit.
+- At most {walk_cap} walks per DAY OF WALKING earn points, counted by the
+  date on the screenshot. Posting Monday's two walks and Tuesday's two walks
+  all together on Tuesday scores all four. A third walk dated the same day
+  earns nothing. Cycling and strength have no daily limit.
 - These are separate bonus points. They do NOT count toward the running plan.
 
 Teams
