@@ -59,7 +59,7 @@ class _Rankable(Protocol):
 
     Both :class:`~bot.models.LeaderboardEntry` (individual) and
     :class:`~bot.models.TeamEntry` (teams) satisfy it, so the SAME ranking /
-    formatting code (including the "1224" tie logic) drives both boards.
+    formatting code (including the dense tie ranking) drives both boards.
     """
 
     points: float
@@ -228,25 +228,28 @@ class LeaderboardService:
         before the hyphen, per the requested layout) with a trailing medal
         for ranks 1–3 and no trailing emoji for ranks 4+.
 
-        Ranks use **standard competition ranking ("1224" style)**: users with
-        the SAME point total share the SAME rank, and the next lower total's
-        rank equals its 1-based position in the sorted list (so ranks are
-        skipped after a tie). ``entries`` MUST already be sorted by points
-        descending with a stable deterministic secondary sort (see
-        :meth:`aggregate`), which keeps ordering within a tie consistent while
-        still assigning every tied user the same rank number/medal. When a rank
-        is skipped due to a tie (e.g. nobody is 2nd because two share 1st), that
-        medal simply does not appear.
+        Ranks use **dense ranking ("1223" style)**: equal totals share a rank,
+        and the next lower total takes the NEXT rank — no numbers are skipped.
+        So the three best SCORES always get the three medals, even when more
+        than three people stand on the podium.
+
+        This is deliberately not the competition ranking used in sport, where
+        two silvers mean no bronze is awarded. In a club chat that reads as a
+        bug: the third-placed runner loses their medal because two other people
+        happened to tie. Here a tie never costs anyone else their medal.
+
+        ``entries`` MUST already be sorted by points descending with a stable
+        deterministic secondary sort (see :meth:`aggregate`), which keeps the
+        order within a tie consistent.
         """
 
         lines: list[str] = []
         prev_points: float | None = None
         rank = 0
-        for position, entry in enumerate(entries, start=1):
-            # Standard competition ranking: a new (lower) total takes the rank
-            # equal to its 1-based position; equal totals keep the prior rank.
+        for entry in entries:
+            # Dense ranking: the rank advances once per DISTINCT total.
             if prev_points is None or entry.points != prev_points:
-                rank = position
+                rank += 1
             prev_points = entry.points
 
             name = entry.label()
@@ -299,8 +302,7 @@ class LeaderboardService:
 
         Uses the SAME renderer as the individual boards, so lines read
         ``{team} ({size})  - {points} points`` (two spaces before the hyphen)
-        with medals for ranks 1–3 and the "1224" standard competition ranking
-        for ties. The size is rendered because the score is a SUM: with equal
+        with medals for ranks 1–3 and dense ("1223") ranking for ties. The size is rendered because the score is a SUM: with equal
         teams it changes nothing, and with unequal ones it makes the advantage
         visible instead of quietly unfair.
         """

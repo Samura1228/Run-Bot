@@ -561,8 +561,9 @@ A late screenshot still lands in time — a Sunday workout posted Monday before
 - Each line shows the **team size in brackets**. With equal teams that changes
   nothing; if you ever run unequal teams, the sum favours the bigger one and
   the bracket makes that visible.
-- **Sorted high→low** with 🥇🥈🥉 and the same **"1224" ranking**: tied teams
-  share a rank/medal and the next rank is skipped.
+- **Sorted high→low** with 🥇🥈🥉 and the same **dense ranking**: tied teams
+  share a rank/medal, and the next team takes the next rank — no rank is
+  skipped, so the three best scores always get the three medals.
 
 Example output:
 

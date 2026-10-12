@@ -770,7 +770,7 @@ A coach sets up the week's teams with a multi-line `/team` message (Section 8); 
 1. Call `_aggregate_with_activities(start, end)`, which is what `aggregate()` itself wraps — the same `read_rows_in_range()` data path in a SINGLE read (the Log is fetched whole, so totals and the per-activity split are computed together rather than in two passes), the same `SEASON_START_DATE` cutoff, the same coach exclusion, the same legacy-`streak_bonus` exclusion, and the same already-stored point values. There are no team multipliers.
 2. Index the resulting `LeaderboardEntry` list by `telegram_user_id`, then sum each team's members. A member with no rows in the range contributes `0` and never drops the team.
 3. Sort by points **descending**, tie-broken by the team name lowercased (deterministic ordering within a tie).
-4. Render with the **same** `_format_ranking()` used by the individual boards, so the `{label}  - {points} points` layout, the medals and the "1224" tie ranking are identical. `format_teams()` wraps each entry in a small render shim whose label carries the member count, giving `Team 1 (5)  - 30 points 🥇`.
+4. Render with the **same** `_format_ranking()` used by the individual boards, so the `{label}  - {points} points` layout, the medals and the dense tie ranking are identical. `format_teams()` wraps each entry in a small render shim whose label carries the member count, giving `Team 1 (5)  - 30 points 🥇`.
 
 Both `LeaderboardEntry` and `TeamEntry` satisfy the small `_Rankable` protocol (`points` + `label()`), which is what lets one renderer drive both boards.
 

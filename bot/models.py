@@ -202,7 +202,7 @@ class TeamEntry(BaseModel):
 
     Exposes the same ``label()`` / ``points`` surface as
     :class:`LeaderboardEntry`, so the shared leaderboard renderer (including
-    the "1224" tie ranking) works unchanged.
+    the dense tie ranking) works unchanged.
     """
 
     name: str
